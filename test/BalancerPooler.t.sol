@@ -4,7 +4,11 @@ pragma solidity ^0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {BalancerPooler} from "../src/dispatchers/BalancerPooler.sol";
 import {ITokenDispatcher} from "../src/interfaces/ITokenDispatcher.sol";
+import {IUnlockCallback} from "../src/interfaces/balancer/IUnlockCallback.sol";
+import {IBalancerVault} from "../src/interfaces/balancer/IBalancerVault.sol";
+import {AddLiquidityParams, AddLiquidityKind} from "../src/interfaces/balancer/BalancerTypes.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /// @dev Simple mock ERC20 for testing.
 contract MockERC20 is ERC20 {
@@ -15,10 +19,89 @@ contract MockERC20 is ERC20 {
     }
 }
 
+/// @dev Mock Balancer Vault that implements the unlock/callback pattern.
+contract MockBalancerVault {
+    // Recorded addLiquidity call parameters
+    AddLiquidityParams public lastParams;
+    bool public addLiquidityCalled;
+
+    // Track settlements
+    struct Settlement {
+        address token;
+        uint256 amount;
+    }
+
+    Settlement[] public settlements;
+
+    function unlock(bytes calldata data) external returns (bytes memory result) {
+        // Call back to the sender (BalancerPooler) with the data
+        result = IUnlockCallback(msg.sender).unlockCallback(data);
+    }
+
+    function addLiquidity(AddLiquidityParams memory params)
+        external
+        returns (uint256[] memory amountsIn, uint256 bptAmountOut, bytes memory returnData)
+    {
+        // Record the call parameters for test assertions
+        lastParams.pool = params.pool;
+        lastParams.to = params.to;
+        lastParams.minBptAmountOut = params.minBptAmountOut;
+        lastParams.kind = params.kind;
+        lastParams.userData = params.userData;
+
+        // Copy maxAmountsIn
+        delete lastParams.maxAmountsIn;
+        for (uint256 i = 0; i < params.maxAmountsIn.length; i++) {
+            lastParams.maxAmountsIn.push(params.maxAmountsIn[i]);
+        }
+
+        addLiquidityCalled = true;
+
+        // Return dummy values
+        amountsIn = params.maxAmountsIn;
+        bptAmountOut = 0;
+        returnData = "";
+    }
+
+    function settle(IERC20 token, uint256 amountHint) external returns (uint256 credit) {
+        settlements.push(Settlement({token: address(token), amount: amountHint}));
+        return amountHint;
+    }
+
+    function sendTo(IERC20, address, uint256) external pure {}
+
+    // Helper functions for test assertions
+    function getSettlementsCount() external view returns (uint256) {
+        return settlements.length;
+    }
+
+    function getSettlement(uint256 index) external view returns (address token, uint256 amount) {
+        Settlement memory s = settlements[index];
+        return (s.token, s.amount);
+    }
+
+    function getLastParamsPool() external view returns (address) {
+        return lastParams.pool;
+    }
+
+    function getLastParamsKind() external view returns (AddLiquidityKind) {
+        return lastParams.kind;
+    }
+
+    function getLastParamsMinBptAmountOut() external view returns (uint256) {
+        return lastParams.minBptAmountOut;
+    }
+
+    function getLastParamsMaxAmountsIn() external view returns (uint256[] memory) {
+        return lastParams.maxAmountsIn;
+    }
+}
+
 contract BalancerPoolerTest is Test {
     BalancerPooler public pooler;
     MockERC20 public primeToken;
     MockERC20 public matchingToken;
+    MockBalancerVault public mockVault;
     address public pool = address(0xA001);
     address public owner = address(this);
     address public minter = address(0xBEEF);
@@ -27,7 +110,16 @@ contract BalancerPoolerTest is Test {
     function setUp() public {
         primeToken = new MockERC20("Prime Token", "PRM");
         matchingToken = new MockERC20("Matching Token", "MTH");
-        pooler = new BalancerPooler(address(primeToken), address(matchingToken), pool, "Pool PRM/MTH", owner);
+        mockVault = new MockBalancerVault();
+        pooler = new BalancerPooler(
+            address(primeToken),
+            address(matchingToken),
+            pool,
+            address(mockVault),
+            true, // primeTokenIsFirst
+            "Pool PRM/MTH",
+            owner
+        );
     }
 
     // =========================================================================
@@ -93,6 +185,14 @@ contract BalancerPoolerTest is Test {
     }
 
     // =========================================================================
+    // vault() getter test
+    // =========================================================================
+
+    function test_vault_returnsCorrectAddress() public view {
+        assertEq(pooler.vault(), address(mockVault));
+    }
+
+    // =========================================================================
     // dispatch tests - thresholds NOT met
     // =========================================================================
 
@@ -143,14 +243,14 @@ contract BalancerPoolerTest is Test {
     }
 
     // =========================================================================
-    // dispatch tests - both thresholds met: transferFrom succeeds
+    // dispatch tests - both thresholds met: 1:1 ratio transfers
     // =========================================================================
 
     function test_dispatch_bothThresholdsMet_transfersTokens() public {
         pooler.setPrimeTokenThreshold(100e18);
         pooler.setMatchingTokenThreshold(100e18);
 
-        // Both meet thresholds
+        // Both meet thresholds, prime < matching
         primeToken.mint(minter, 150e18);
         matchingToken.mint(minter, 200e18);
 
@@ -161,22 +261,22 @@ contract BalancerPoolerTest is Test {
 
         pooler.dispatch(minter, 10e18);
 
-        // All tokens should have been transferred from minter to pooler
-        assertEq(primeToken.balanceOf(minter), 0);
-        assertEq(matchingToken.balanceOf(minter), 0);
-        assertEq(primeToken.balanceOf(address(pooler)), 150e18);
-        assertEq(matchingToken.balanceOf(address(pooler)), 200e18);
+        // 1:1 ratio: donateAmount = min(150, 200) = 150
+        // Prime: 150 donated, 0 remaining in minter
+        // Matching: 150 donated, 50 remaining in minter
+        // Tokens end up in vault after settle
+        assertEq(primeToken.balanceOf(minter), 0, "All prime transferred (was the min)");
+        assertEq(matchingToken.balanceOf(minter), 50e18, "Surplus matching stays in minter");
+        assertEq(primeToken.balanceOf(address(mockVault)), 150e18, "Prime tokens settled in vault");
+        assertEq(matchingToken.balanceOf(address(mockVault)), 150e18, "Matching tokens settled in vault");
     }
 
     // =========================================================================
-    // dispatch tests - TODO pool donation (tokens stay in pooler, not donated)
+    // dispatch tests - donation via vault
     // =========================================================================
 
-    /// @notice After transferFrom succeeds, the pool donation is a TODO stub.
-    /// @dev This test verifies that tokens end up in the pooler contract (not the pool)
-    ///      because the actual pool donation has not been implemented yet.
-    ///      Once pool donation is implemented, tokens should move from pooler to pool.
-    function test_dispatch_afterTransfer_poolDonationIsTodo() public {
+    /// @notice Verifies that dispatch triggers the vault unlock flow and calls addLiquidity with DONATION kind.
+    function test_dispatch_donatesViaVault() public {
         pooler.setPrimeTokenThreshold(100e18);
         pooler.setMatchingTokenThreshold(100e18);
 
@@ -190,11 +290,116 @@ contract BalancerPoolerTest is Test {
 
         pooler.dispatch(minter, 10e18);
 
-        // Tokens are in the pooler, NOT in the pool - pool donation is TODO
-        assertEq(primeToken.balanceOf(address(pooler)), 100e18, "Prime tokens stuck in pooler (pool donation is TODO)");
-        assertEq(matchingToken.balanceOf(address(pooler)), 100e18, "Matching tokens stuck in pooler (pool donation is TODO)");
-        assertEq(primeToken.balanceOf(pool), 0, "Pool has no tokens - donation not implemented yet");
-        assertEq(matchingToken.balanceOf(pool), 0, "Pool has no tokens - donation not implemented yet");
+        // Verify addLiquidity was called
+        assertTrue(mockVault.addLiquidityCalled(), "addLiquidity should have been called");
+
+        // Verify DONATION kind
+        assertEq(
+            uint256(mockVault.getLastParamsKind()),
+            uint256(AddLiquidityKind.DONATION),
+            "addLiquidity should use DONATION kind"
+        );
+    }
+
+    /// @notice Verifies that donation uses the correct pool address.
+    function test_dispatch_donationUsesCorrectPool() public {
+        primeToken.mint(minter, 100e18);
+        matchingToken.mint(minter, 100e18);
+
+        vm.startPrank(minter);
+        primeToken.approve(address(pooler), type(uint256).max);
+        matchingToken.approve(address(pooler), type(uint256).max);
+        vm.stopPrank();
+
+        pooler.dispatch(minter, 10e18);
+
+        assertEq(mockVault.getLastParamsPool(), pool, "Donation should use the correct pool address");
+    }
+
+    /// @notice Verifies donation sets minBptAmountOut to 0.
+    function test_dispatch_donationSetsMinBptAmountOutToZero() public {
+        primeToken.mint(minter, 100e18);
+        matchingToken.mint(minter, 100e18);
+
+        vm.startPrank(minter);
+        primeToken.approve(address(pooler), type(uint256).max);
+        matchingToken.approve(address(pooler), type(uint256).max);
+        vm.stopPrank();
+
+        pooler.dispatch(minter, 10e18);
+
+        assertEq(mockVault.getLastParamsMinBptAmountOut(), 0, "minBptAmountOut should be 0 for donation");
+    }
+
+    // =========================================================================
+    // dispatch tests - 1:1 ratio behavior
+    // =========================================================================
+
+    /// @notice When primeBalance > matchingBalance, donateAmount equals matchingBalance
+    ///         and surplus prime stays in minter.
+    function test_dispatch_primeGreaterThanMatching_surplusPrimeStaysInMinter() public {
+        primeToken.mint(minter, 200e18);
+        matchingToken.mint(minter, 100e18);
+
+        vm.startPrank(minter);
+        primeToken.approve(address(pooler), type(uint256).max);
+        matchingToken.approve(address(pooler), type(uint256).max);
+        vm.stopPrank();
+
+        pooler.dispatch(minter, 10e18);
+
+        // donateAmount = min(200, 100) = 100
+        assertEq(primeToken.balanceOf(minter), 100e18, "Surplus prime should stay in minter");
+        assertEq(matchingToken.balanceOf(minter), 0, "All matching should be donated");
+        // Tokens end up in vault
+        assertEq(primeToken.balanceOf(address(mockVault)), 100e18, "100 prime donated to vault");
+        assertEq(matchingToken.balanceOf(address(mockVault)), 100e18, "100 matching donated to vault");
+
+        // Verify addLiquidity amounts
+        uint256[] memory amounts = mockVault.getLastParamsMaxAmountsIn();
+        assertEq(amounts[0], 100e18, "maxAmountsIn[0] should be donateAmount");
+        assertEq(amounts[1], 100e18, "maxAmountsIn[1] should be donateAmount");
+    }
+
+    /// @notice When matchingBalance > primeBalance, donateAmount equals primeBalance
+    ///         and surplus matching stays in minter.
+    function test_dispatch_matchingGreaterThanPrime_surplusMatchingStaysInMinter() public {
+        primeToken.mint(minter, 80e18);
+        matchingToken.mint(minter, 150e18);
+
+        vm.startPrank(minter);
+        primeToken.approve(address(pooler), type(uint256).max);
+        matchingToken.approve(address(pooler), type(uint256).max);
+        vm.stopPrank();
+
+        pooler.dispatch(minter, 10e18);
+
+        // donateAmount = min(80, 150) = 80
+        assertEq(primeToken.balanceOf(minter), 0, "All prime should be donated");
+        assertEq(matchingToken.balanceOf(minter), 70e18, "Surplus matching should stay in minter");
+        // Tokens end up in vault
+        assertEq(primeToken.balanceOf(address(mockVault)), 80e18, "80 prime donated to vault");
+        assertEq(matchingToken.balanceOf(address(mockVault)), 80e18, "80 matching donated to vault");
+    }
+
+    /// @notice When balances are equal, both fully donated with nothing remaining in minter.
+    function test_dispatch_equalBalances_bothFullyDonated() public {
+        primeToken.mint(minter, 100e18);
+        matchingToken.mint(minter, 100e18);
+
+        vm.startPrank(minter);
+        primeToken.approve(address(pooler), type(uint256).max);
+        matchingToken.approve(address(pooler), type(uint256).max);
+        vm.stopPrank();
+
+        pooler.dispatch(minter, 10e18);
+
+        // donateAmount = min(100, 100) = 100
+        assertEq(primeToken.balanceOf(minter), 0, "No prime should remain in minter");
+        assertEq(matchingToken.balanceOf(minter), 0, "No matching should remain in minter");
+        // Tokens end up in vault
+        assertEq(primeToken.balanceOf(address(mockVault)), 100e18, "100 prime donated to vault");
+        assertEq(matchingToken.balanceOf(address(mockVault)), 100e18, "100 matching donated to vault");
     }
 
     // =========================================================================
@@ -213,10 +418,21 @@ contract BalancerPoolerTest is Test {
 
         pooler.dispatch(minter, 10e18);
 
-        // Tokens should be transferred since thresholds are 0
-        assertEq(primeToken.balanceOf(minter), 0);
-        assertEq(matchingToken.balanceOf(minter), 0);
-        assertEq(primeToken.balanceOf(address(pooler)), 10e18);
-        assertEq(matchingToken.balanceOf(address(pooler)), 5e18);
+        // 1:1 ratio: donateAmount = min(10, 5) = 5
+        assertEq(primeToken.balanceOf(minter), 5e18, "Surplus prime stays in minter");
+        assertEq(matchingToken.balanceOf(minter), 0, "All matching donated");
+        assertEq(primeToken.balanceOf(address(mockVault)), 5e18, "5 prime in vault");
+        assertEq(matchingToken.balanceOf(address(mockVault)), 5e18, "5 matching in vault");
+    }
+
+    // =========================================================================
+    // unlockCallback tests
+    // =========================================================================
+
+    /// @notice unlockCallback reverts if caller is not the vault.
+    function test_unlockCallback_revertsIfCallerIsNotVault() public {
+        vm.prank(nonOwner);
+        vm.expectRevert("BalancerPooler: caller is not vault");
+        pooler.unlockCallback(abi.encode(uint256(100e18)));
     }
 }

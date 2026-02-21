@@ -57,15 +57,11 @@ contract BurnerTest is Test {
     }
 
     // =========================================================================
-    // dispatch tests (TDD Red Phase - burn test should FAIL)
+    // dispatch tests
     // =========================================================================
 
-    /// @notice This test verifies that dispatch pulls tokens from the minter and burns them.
-    /// @dev TDD RED PHASE: This test is expected to FAIL because the burn logic is a TODO stub.
-    ///      The Burner.dispatch currently pulls tokens from the minter to itself but does NOT
-    ///      actually burn them. Once the burn implementation is added in a future story,
-    ///      this test should pass.
-    function test_dispatch_burnsToken_EXPECTED_FAIL() public {
+    /// @notice Verifies that dispatch pulls tokens from the minter and burns them.
+    function test_dispatch_burnsToken() public {
         uint256 amount = 100e18;
 
         // Mint tokens to the minter address
@@ -79,12 +75,12 @@ contract BurnerTest is Test {
         burner.dispatch(minter, amount);
 
         // After dispatch, the tokens should be BURNED (total supply decreased)
-        // This WILL FAIL because burn is TODO - tokens are held by burner, not burned
         assertEq(token.totalSupply(), 0, "Tokens should be burned, reducing total supply to 0");
+        // Burner contract should have 0 balance (tokens are burned, not held)
+        assertEq(token.balanceOf(address(burner)), 0, "Burner should have 0 balance after burning");
     }
 
-    /// @notice Verifies that dispatch actually pulls tokens from the minter.
-    /// @dev This test should PASS - the transferFrom works, just the burn is missing.
+    /// @notice Verifies that dispatch pulls tokens from the minter and burns them.
     function test_dispatch_pullsTokensFromMinter() public {
         uint256 amount = 50e18;
 
@@ -97,7 +93,7 @@ contract BurnerTest is Test {
 
         // Minter should have no tokens left (they were pulled)
         assertEq(token.balanceOf(minter), 0);
-        // Burner should hold the tokens (since burn is TODO)
-        assertEq(token.balanceOf(address(burner)), amount);
+        // Burner should have no tokens (they were burned)
+        assertEq(token.balanceOf(address(burner)), 0);
     }
 }

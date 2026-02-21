@@ -19,6 +19,19 @@ contract MockERC20 is ERC20 {
     }
 }
 
+/// @dev Mock ERC20 with burn capability for Burner dispatcher tests.
+contract MockBurnableERC20 is ERC20 {
+    constructor(string memory name_, string memory symbol_) ERC20(name_, symbol_) {}
+
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
+
+    function burn(uint256 amount) external {
+        _burn(msg.sender, amount);
+    }
+}
+
 contract NFTMinterTest is Test {
     NFTMinter public minter;
     MockERC20 public tokenA;
@@ -176,19 +189,23 @@ contract NFTMinterTest is Test {
     }
 
     function test_mint_invokesDispatcher() public {
-        // Register burner dispatcher - it will pull tokens from minter
-        minter.registerDispatcher(address(burner), 10e18, 0);
+        // Register burner dispatcher with a burnable token - it will pull tokens from minter and burn them
+        MockBurnableERC20 burnableToken = new MockBurnableERC20("Burnable Token", "BRN");
+        Burner burnableDispatcher = new Burner(address(burnableToken), "Burn BRN", owner);
+        minter.registerDispatcher(address(burnableDispatcher), 10e18, 0);
 
-        tokenA.mint(user, 100e18);
+        burnableToken.mint(user, 100e18);
         vm.prank(user);
-        tokenA.approve(address(minter), type(uint256).max);
+        burnableToken.approve(address(minter), type(uint256).max);
 
         vm.prank(user);
-        minter.mint(address(tokenA), 1, recipient);
+        minter.mint(address(burnableToken), 1, recipient);
 
-        // Burner should have pulled tokens from minter
-        assertEq(tokenA.balanceOf(address(burner)), 10e18);
-        assertEq(tokenA.balanceOf(address(minter)), 0);
+        // Burner should have burned the tokens (not holding them)
+        assertEq(burnableToken.balanceOf(address(burnableDispatcher)), 0);
+        assertEq(burnableToken.balanceOf(address(minter)), 0);
+        // Total supply should be reduced by the burned amount
+        assertEq(burnableToken.totalSupply(), 90e18);
     }
 
     // =========================================================================
