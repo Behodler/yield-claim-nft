@@ -11,6 +11,7 @@ import {AddLiquidityParams, AddLiquidityKind} from "../interfaces/balancer/Balan
 /// @title BalancerPooler
 /// @notice A token dispatcher that accumulates tokens in the minter until thresholds are met,
 ///         then donates both prime and matching tokens to a Balancer V3 pool at a 1:1 ratio.
+///         Because tokens balances are usually not in a 1:1 ratio, there will be some leftover of 1 token. This is just left in minter to accumulate.
 /// @dev Implements IUnlockCallback to interact with the Balancer V3 vault's unlock pattern.
 contract BalancerPooler is ITokenDispatcher, IUnlockCallback, Ownable {
     address private immutable _primeToken;
