@@ -569,4 +569,185 @@ contract NFTMinterTest is Test {
         accumulator.unpause();
         assertFalse(accumulator.paused());
     }
+
+    // =========================================================================
+    // Global Pauser Integration tests (IPausable / setPauser / pause / unpause)
+    // =========================================================================
+
+    address public globalPauser = address(0xDA05);
+
+    function test_setPauser_setsPauserAddress() public {
+        minter.setPauser(globalPauser);
+        assertEq(minter.pauser(), globalPauser);
+    }
+
+    function test_setPauser_emitsPauserChangedEvent() public {
+        vm.expectEmit(true, true, false, true);
+        emit NFTMinter.PauserChanged(address(0), globalPauser);
+
+        minter.setPauser(globalPauser);
+    }
+
+    function test_setPauser_revertsForNonOwner() public {
+        vm.prank(user);
+        vm.expectRevert();
+        minter.setPauser(globalPauser);
+    }
+
+    function test_globalPause_setsPausedTrue() public {
+        minter.setPauser(globalPauser);
+
+        vm.prank(globalPauser);
+        minter.pause();
+
+        assertTrue(minter.paused());
+    }
+
+    function test_globalPause_emitsPausedEvent() public {
+        minter.setPauser(globalPauser);
+
+        vm.expectEmit(true, false, false, true);
+        emit NFTMinter.Paused(globalPauser);
+
+        vm.prank(globalPauser);
+        minter.pause();
+    }
+
+    function test_globalPause_revertsWhenCalledByNonPauser() public {
+        minter.setPauser(globalPauser);
+
+        // Random user cannot pause
+        vm.prank(user);
+        vm.expectRevert("Only pauser");
+        minter.pause();
+
+        // Owner cannot pause (only pauser can)
+        vm.expectRevert("Only pauser");
+        minter.pause();
+    }
+
+    function test_globalUnpause_setsPausedFalse() public {
+        minter.setPauser(globalPauser);
+
+        // Pause first
+        vm.prank(globalPauser);
+        minter.pause();
+        assertTrue(minter.paused());
+
+        // Unpause
+        vm.prank(globalPauser);
+        minter.unpause();
+        assertFalse(minter.paused());
+    }
+
+    function test_globalUnpause_emitsUnpausedEvent() public {
+        minter.setPauser(globalPauser);
+
+        vm.prank(globalPauser);
+        minter.pause();
+
+        vm.expectEmit(true, false, false, true);
+        emit NFTMinter.Unpaused(globalPauser);
+
+        vm.prank(globalPauser);
+        minter.unpause();
+    }
+
+    function test_globalUnpause_revertsWhenCalledByNonPauser() public {
+        minter.setPauser(globalPauser);
+
+        // Pause first
+        vm.prank(globalPauser);
+        minter.pause();
+
+        // Random user cannot unpause
+        vm.prank(user);
+        vm.expectRevert("Only pauser");
+        minter.unpause();
+
+        // Owner cannot unpause (only pauser can)
+        vm.expectRevert("Only pauser");
+        minter.unpause();
+    }
+
+    function test_mint_revertsWhenContractIsPaused() public {
+        // Register dispatcher and authorize minter
+        _registerAndAuthorizeMinter(address(accumulator));
+
+        // Give user tokens and approve
+        tokenA.mint(user, 100e18);
+        vm.prank(user);
+        tokenA.approve(address(minter), type(uint256).max);
+
+        // Set pauser and pause the contract
+        minter.setPauser(globalPauser);
+        vm.prank(globalPauser);
+        minter.pause();
+
+        // Mint should revert with "Contract is paused"
+        vm.prank(user);
+        vm.expectRevert("Contract is paused");
+        minter.mint(address(tokenA), 1, recipient);
+    }
+
+    function test_mint_worksNormallyWhenContractIsNotPaused() public {
+        // Register dispatcher and authorize minter
+        _registerAndAuthorizeMinter(address(accumulator));
+
+        // Give user tokens and approve
+        tokenA.mint(user, 100e18);
+        vm.prank(user);
+        tokenA.approve(address(minter), type(uint256).max);
+
+        // Set pauser but do NOT pause
+        minter.setPauser(globalPauser);
+        assertFalse(minter.paused());
+
+        // Mint should succeed
+        vm.prank(user);
+        bool success = minter.mint(address(tokenA), 1, recipient);
+        assertTrue(success);
+        assertEq(minter.balanceOf(recipient, minter.CLAIM_TOKEN_ID()), 1);
+    }
+
+    function test_pauserGetter_returnsCorrectAddress() public {
+        // Initially zero
+        assertEq(minter.pauser(), address(0));
+
+        // After setting
+        minter.setPauser(globalPauser);
+        assertEq(minter.pauser(), globalPauser);
+
+        // After changing
+        address newPauser = address(0xEEEE);
+        minter.setPauser(newPauser);
+        assertEq(minter.pauser(), newPauser);
+    }
+
+    function test_adminFunctions_workWhenContractIsPaused() public {
+        // Register a dispatcher first
+        _registerAndAuthorizeMinter(address(accumulator));
+
+        // Pause the contract
+        minter.setPauser(globalPauser);
+        vm.prank(globalPauser);
+        minter.pause();
+        assertTrue(minter.paused());
+
+        // registerDispatcher should still work
+        Accumulator accumulator2 = new Accumulator(address(tokenB), "Acc2", owner);
+        accumulator2.setMinter(address(minter));
+        minter.registerDispatcher(address(accumulator2), 5e18, 200);
+        (address dispatcher,,) = minter.configs(2);
+        assertEq(dispatcher, address(accumulator2));
+
+        // setPrice should still work
+        minter.setPrice(1, 20e18);
+        assertEq(minter.getPrice(1), 20e18);
+
+        // setGrowthFactor should still work
+        minter.setGrowthFactor(1, 500);
+        (,, uint256 growthBps) = minter.configs(1);
+        assertEq(growthBps, 500);
+    }
 }

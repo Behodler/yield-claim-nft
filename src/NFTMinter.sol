@@ -7,8 +7,9 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ITokenDispatcher} from "./interfaces/ITokenDispatcher.sol";
 import {ATokenDispatcher} from "./dispatchers/ATokenDispatcher.sol";
 import {ITokenMinter} from "./interfaces/ITokenMinter.sol";
+import {IPausable} from "pauser/interfaces/IPausable.sol";
 
-contract NFTMinter is ERC1155, Ownable, ITokenMinter {
+contract NFTMinter is ERC1155, Ownable, ITokenMinter, IPausable {
     /// @notice The single global claim NFT token ID.
     uint256 public constant CLAIM_TOKEN_ID = 1;
 
@@ -51,7 +52,44 @@ contract NFTMinter is ERC1155, Ownable, ITokenMinter {
     /// @notice Emitted when a dispatcher's active state is changed.
     event DispatcherActiveChanged(address indexed dispatcher, bool active);
 
+    /// @notice Emitted when the pauser address is changed.
+    event PauserChanged(address indexed oldPauser, address indexed newPauser);
+
+    /// @notice Emitted when the contract is paused.
+    event Paused(address indexed triggeredBy);
+
+    /// @notice Emitted when the contract is unpaused.
+    event Unpaused(address indexed triggeredBy);
+
+    /// @notice The address authorized to pause/unpause this contract via the Global Pauser.
+    address public pauser;
+
+    /// @notice Whether the contract is currently paused.
+    bool public paused;
+
     constructor(address initialOwner) ERC1155("") Ownable(initialOwner) {}
+
+    /// @notice Sets the authorized pauser address. Only callable by owner.
+    /// @param newPauser The new pauser address.
+    function setPauser(address newPauser) external onlyOwner {
+        address oldPauser = pauser;
+        pauser = newPauser;
+        emit PauserChanged(oldPauser, newPauser);
+    }
+
+    /// @notice Pauses the contract. Only callable by the authorized pauser.
+    function pause() external {
+        require(msg.sender == pauser, "Only pauser");
+        paused = true;
+        emit Paused(msg.sender);
+    }
+
+    /// @notice Unpauses the contract. Only callable by the authorized pauser.
+    function unpause() external {
+        require(msg.sender == pauser, "Only pauser");
+        paused = false;
+        emit Unpaused(msg.sender);
+    }
 
     /// @inheritdoc ITokenMinter
     function registerDispatcher(address dispatcher, uint256 initialPrice, uint256 growthBasisPoints) external onlyOwner {
@@ -85,6 +123,7 @@ contract NFTMinter is ERC1155, Ownable, ITokenMinter {
 
     /// @inheritdoc ITokenMinter
     function mint(address token, uint256 index, address recipient) external returns (bool) {
+        require(!paused, "Contract is paused");
         DispatcherConfig storage config = configs[index];
         require(config.dispatcher != address(0), "NFTMinter: index not registered");
 
