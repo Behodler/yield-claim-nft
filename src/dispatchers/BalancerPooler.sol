@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ATokenDispatcher} from "./ATokenDispatcher.sol";
 import {ITokenDispatcher} from "../interfaces/ITokenDispatcher.sol";
 import {IBalancerVault} from "../interfaces/balancer/IBalancerVault.sol";
 import {IUnlockCallback} from "../interfaces/balancer/IUnlockCallback.sol";
@@ -13,7 +13,7 @@ import {AddLiquidityParams, AddLiquidityKind} from "../interfaces/balancer/Balan
 ///         then donates both prime and matching tokens to a Balancer V3 pool at a 1:1 ratio.
 ///         Because tokens balances are usually not in a 1:1 ratio, there will be some leftover of 1 token. This is just left in minter to accumulate.
 /// @dev Implements IUnlockCallback to interact with the Balancer V3 vault's unlock pattern.
-contract BalancerPooler is ITokenDispatcher, IUnlockCallback, Ownable {
+contract BalancerPooler is ATokenDispatcher, IUnlockCallback {
     address private immutable _primeToken;
     address private immutable _matchingToken;
     address private immutable _pool;
@@ -37,7 +37,7 @@ contract BalancerPooler is ITokenDispatcher, IUnlockCallback, Ownable {
         bool primeTokenIsFirst_,
         string memory flavour_,
         address initialOwner
-    ) Ownable(initialOwner) {
+    ) ATokenDispatcher(initialOwner) {
         _primeToken = primeToken_;
         _matchingToken = matchingToken_;
         _pool = pool_;
@@ -82,8 +82,8 @@ contract BalancerPooler is ITokenDispatcher, IUnlockCallback, Ownable {
         return _vault;
     }
 
-    /// @inheritdoc ITokenDispatcher
-    function dispatch(address minter, uint256 amount) external {
+    /// @notice Dispatches tokens: if both thresholds are met, donates to Balancer pool at 1:1 ratio.
+    function dispatch(address minter, uint256 amount) external override whenNotPaused {
         // Check if both thresholds are met on the minter
         uint256 primeBalance = IERC20(_primeToken).balanceOf(minter);
         uint256 matchingBalance = IERC20(_matchingToken).balanceOf(minter);

@@ -4,9 +4,11 @@ pragma solidity ^0.8.20;
 import {Test, console} from "forge-std/Test.sol";
 import {NFTMinter} from "../src/NFTMinter.sol";
 import {Accumulator} from "../src/dispatchers/Accumulator.sol";
+import {ATokenDispatcher} from "../src/dispatchers/ATokenDispatcher.sol";
 import {Burner} from "../src/dispatchers/Burner.sol";
 import {BalancerPooler} from "../src/dispatchers/BalancerPooler.sol";
 import {ITokenDispatcher} from "../src/interfaces/ITokenDispatcher.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
@@ -332,5 +334,239 @@ contract NFTMinterTest is Test {
 
         // User's balance should reflect total paid
         assertEq(tokenA.balanceOf(user), 10000e18 - totalPaid);
+    }
+
+    // =========================================================================
+    // emergencyWithdraw tests
+    // =========================================================================
+
+    function test_emergencyWithdraw_succeeds_forOwnerWithStuckTokens() public {
+        // Register accumulator (no-op dispatcher, tokens stay in minter)
+        minter.registerDispatcher(address(accumulator), 10e18, 0);
+
+        // Give user tokens and approve
+        tokenA.mint(user, 100e18);
+        vm.prank(user);
+        tokenA.approve(address(minter), type(uint256).max);
+
+        // Mint to accumulate tokens in the minter
+        vm.prank(user);
+        minter.mint(address(tokenA), 1, recipient);
+
+        // Minter should have 10e18 stuck
+        assertEq(tokenA.balanceOf(address(minter)), 10e18);
+
+        // Owner (this contract) calls emergencyWithdraw
+        vm.expectEmit(true, true, false, true);
+        emit NFTMinter.EmergencyWithdraw(address(tokenA), owner, 10e18);
+        minter.emergencyWithdraw(address(tokenA));
+
+        // Tokens rescued to owner
+        assertEq(tokenA.balanceOf(owner), 10e18);
+        assertEq(tokenA.balanceOf(address(minter)), 0);
+    }
+
+    function test_emergencyWithdraw_revertsForNonOwner() public {
+        // Get some tokens stuck in minter
+        minter.registerDispatcher(address(accumulator), 10e18, 0);
+        tokenA.mint(user, 100e18);
+        vm.prank(user);
+        tokenA.approve(address(minter), type(uint256).max);
+        vm.prank(user);
+        minter.mint(address(tokenA), 1, recipient);
+
+        // Non-owner should be rejected
+        vm.prank(user);
+        vm.expectRevert();
+        minter.emergencyWithdraw(address(tokenA));
+    }
+
+    function test_emergencyWithdraw_revertsWhenNoTokens() public {
+        // No tokens in minter
+        vm.expectRevert("NFTMinter: no tokens to withdraw");
+        minter.emergencyWithdraw(address(tokenA));
+    }
+
+    // =========================================================================
+    // setDispatcherActive tests
+    // =========================================================================
+
+    /// @dev Helper to register a dispatcher and set up minter as the authorized minter on the dispatcher.
+    function _registerAndAuthorizeMinter(address dispatcher_) internal {
+        minter.registerDispatcher(dispatcher_, 10e18, 0);
+        // The dispatcher owner (this test contract) authorizes the minter to pause/unpause
+        ATokenDispatcher(dispatcher_).setMinter(address(minter));
+    }
+
+    function test_setDispatcherActive_false_pausesDispatcher() public {
+        _registerAndAuthorizeMinter(address(accumulator));
+
+        // Pause the dispatcher
+        minter.setDispatcherActive(address(accumulator), false);
+
+        // Verify the dispatcher is paused
+        assertTrue(accumulator.paused(), "Dispatcher should be paused");
+    }
+
+    function test_setDispatcherActive_true_unpausesDispatcher() public {
+        _registerAndAuthorizeMinter(address(accumulator));
+
+        // Pause first
+        minter.setDispatcherActive(address(accumulator), false);
+        assertTrue(accumulator.paused(), "Dispatcher should be paused");
+
+        // Unpause
+        minter.setDispatcherActive(address(accumulator), true);
+        assertFalse(accumulator.paused(), "Dispatcher should be unpaused");
+    }
+
+    function test_setDispatcherActive_revertsForNonOwner() public {
+        _registerAndAuthorizeMinter(address(accumulator));
+
+        vm.prank(user);
+        vm.expectRevert();
+        minter.setDispatcherActive(address(accumulator), false);
+    }
+
+    function test_setDispatcherActive_revertsForUnregisteredDispatcher() public {
+        vm.expectRevert("NFTMinter: dispatcher not registered");
+        minter.setDispatcherActive(address(accumulator), false);
+    }
+
+    function test_setDispatcherActive_emitsEvent() public {
+        _registerAndAuthorizeMinter(address(accumulator));
+
+        vm.expectEmit(true, false, false, true);
+        emit NFTMinter.DispatcherActiveChanged(address(accumulator), false);
+        minter.setDispatcherActive(address(accumulator), false);
+    }
+
+    function test_setDispatcherActive_handlesAlreadyPausedGracefully() public {
+        _registerAndAuthorizeMinter(address(accumulator));
+
+        // Pause the dispatcher
+        minter.setDispatcherActive(address(accumulator), false);
+        assertTrue(accumulator.paused());
+
+        // Calling pause again should not revert (graceful handling)
+        minter.setDispatcherActive(address(accumulator), false);
+        assertTrue(accumulator.paused());
+    }
+
+    function test_setDispatcherActive_handlesAlreadyUnpausedGracefully() public {
+        _registerAndAuthorizeMinter(address(accumulator));
+
+        // Dispatcher starts unpaused, calling unpause again should not revert
+        assertFalse(accumulator.paused());
+        minter.setDispatcherActive(address(accumulator), true);
+        assertFalse(accumulator.paused());
+    }
+
+    // =========================================================================
+    // mint() with paused dispatcher tests
+    // =========================================================================
+
+    function test_mint_revertsWhenDispatcherIsPaused() public {
+        _registerAndAuthorizeMinter(address(accumulator));
+
+        // Give user tokens and approve
+        tokenA.mint(user, 100e18);
+        vm.prank(user);
+        tokenA.approve(address(minter), type(uint256).max);
+
+        // Pause the dispatcher
+        minter.setDispatcherActive(address(accumulator), false);
+
+        // Mint should revert because dispatcher is paused (whenNotPaused reverts with EnforcedPause)
+        vm.prank(user);
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        minter.mint(address(tokenA), 1, recipient);
+    }
+
+    function test_mint_worksNormallyWhenDispatcherIsActive() public {
+        _registerAndAuthorizeMinter(address(accumulator));
+
+        // Give user tokens and approve
+        tokenA.mint(user, 100e18);
+        vm.prank(user);
+        tokenA.approve(address(minter), type(uint256).max);
+
+        // Dispatcher is active (not paused) by default
+        assertFalse(accumulator.paused());
+
+        // Mint should succeed
+        vm.prank(user);
+        bool success = minter.mint(address(tokenA), 1, recipient);
+        assertTrue(success);
+        assertEq(minter.balanceOf(recipient, minter.CLAIM_TOKEN_ID()), 1);
+    }
+
+    // =========================================================================
+    // ATokenDispatcher setMinter tests
+    // =========================================================================
+
+    function test_ATokenDispatcher_setMinter_onlyOwner() public {
+        // Non-owner should not be able to call setMinter
+        vm.prank(user);
+        vm.expectRevert();
+        accumulator.setMinter(user);
+    }
+
+    function test_ATokenDispatcher_setMinter_ownerCanSet() public {
+        // Owner (this test contract) should be able to set the minter
+        accumulator.setMinter(address(minter));
+        // No revert means success. Verify by testing that minter can now call pause
+        vm.prank(address(minter));
+        accumulator.pause();
+        assertTrue(accumulator.paused());
+    }
+
+    // =========================================================================
+    // ATokenDispatcher pause/unpause restricted to minter
+    // =========================================================================
+
+    function test_ATokenDispatcher_pause_restrictedToMinter() public {
+        accumulator.setMinter(address(minter));
+
+        // Non-minter should not be able to call pause
+        vm.prank(user);
+        vm.expectRevert("ATokenDispatcher: caller is not minter");
+        accumulator.pause();
+
+        // Owner (not the minter) also cannot call pause
+        vm.expectRevert("ATokenDispatcher: caller is not minter");
+        accumulator.pause();
+    }
+
+    function test_ATokenDispatcher_unpause_restrictedToMinter() public {
+        accumulator.setMinter(address(minter));
+
+        // Pause first via the minter
+        vm.prank(address(minter));
+        accumulator.pause();
+        assertTrue(accumulator.paused());
+
+        // Non-minter should not be able to unpause
+        vm.prank(user);
+        vm.expectRevert("ATokenDispatcher: caller is not minter");
+        accumulator.unpause();
+
+        // Owner (not the minter) also cannot unpause
+        vm.expectRevert("ATokenDispatcher: caller is not minter");
+        accumulator.unpause();
+    }
+
+    function test_ATokenDispatcher_minterCanPauseAndUnpause() public {
+        accumulator.setMinter(address(minter));
+
+        // Minter can pause
+        vm.prank(address(minter));
+        accumulator.pause();
+        assertTrue(accumulator.paused());
+
+        // Minter can unpause
+        vm.prank(address(minter));
+        accumulator.unpause();
+        assertFalse(accumulator.paused());
     }
 }

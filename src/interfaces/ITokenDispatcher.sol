@@ -10,9 +10,4 @@ interface ITokenDispatcher {
 
     /// @notice Returns a human-readable metadata string describing this dispatcher (like ERC20 symbol).
     function flavour() external view returns (string memory);
-
-    /// @notice Executes the dispatch logic. Called by NFTMinter after pulling tokens from the user.
-    /// @param minter The NFTMinter contract address (msg.sender from minter's perspective).
-    /// @param amount The amount of prime token that was paid for this mint.
-    function dispatch(address minter, uint256 amount) external;
 }

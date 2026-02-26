@@ -5,6 +5,7 @@ import {ERC1155} from "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ITokenDispatcher} from "./interfaces/ITokenDispatcher.sol";
+import {ATokenDispatcher} from "./dispatchers/ATokenDispatcher.sol";
 import {ITokenMinter} from "./interfaces/ITokenMinter.sol";
 
 contract NFTMinter is ERC1155, Ownable, ITokenMinter {
@@ -43,6 +44,12 @@ contract NFTMinter is ERC1155, Ownable, ITokenMinter {
 
     /// @notice Emitted when a dispatcher's growth factor is updated.
     event GrowthFactorUpdated(uint256 indexed index, uint256 oldGrowthBasisPoints, uint256 newGrowthBasisPoints);
+
+    /// @notice Emitted when the owner rescues stuck ERC20 tokens.
+    event EmergencyWithdraw(address indexed token, address indexed to, uint256 amount);
+
+    /// @notice Emitted when a dispatcher's active state is changed.
+    event DispatcherActiveChanged(address indexed dispatcher, bool active);
 
     constructor(address initialOwner) ERC1155("") Ownable(initialOwner) {}
 
@@ -90,8 +97,8 @@ contract NFTMinter is ERC1155, Ownable, ITokenMinter {
         // Pull tokens from the user to this contract
         IERC20(token).transferFrom(msg.sender, address(this), price);
 
-        // Invoke the dispatcher
-        ITokenDispatcher(config.dispatcher).dispatch(address(this), price);
+        // Invoke the dispatcher (dispatch is on ATokenDispatcher with whenNotPaused guard)
+        ATokenDispatcher(config.dispatcher).dispatch(address(this), price);
 
         // Grow price: newPrice = oldPrice + (oldPrice * growthBasisPoints / 10000)
         config.price = price + (price * config.growthBasisPoints) / 10000;
@@ -135,5 +142,37 @@ contract NFTMinter is ERC1155, Ownable, ITokenMinter {
         uint256 oldGrowthBasisPoints = configs[index].growthBasisPoints;
         configs[index].growthBasisPoints = newGrowthBasisPoints;
         emit GrowthFactorUpdated(index, oldGrowthBasisPoints, newGrowthBasisPoints);
+    }
+
+    /// @notice Rescues any ERC20 token stuck in this contract. Only callable by owner.
+    /// @param token The ERC20 token address to withdraw.
+    function emergencyWithdraw(address token) external onlyOwner {
+        uint256 balance = IERC20(token).balanceOf(address(this));
+        require(balance > 0, "NFTMinter: no tokens to withdraw");
+        IERC20(token).transfer(msg.sender, balance);
+        emit EmergencyWithdraw(token, msg.sender, balance);
+    }
+
+    /// @notice Pauses or unpauses a registered dispatcher. Only callable by owner.
+    /// @param dispatcher The dispatcher contract address.
+    /// @param active If true, unpauses the dispatcher; if false, pauses it.
+    function setDispatcherActive(address dispatcher, bool active) external onlyOwner {
+        require(dispatcherToIndex[dispatcher] != 0, "NFTMinter: dispatcher not registered");
+
+        ATokenDispatcher dispatcherContract = ATokenDispatcher(dispatcher);
+
+        if (active) {
+            // Only unpause if currently paused, to avoid revert from ExpectedPause()
+            if (dispatcherContract.paused()) {
+                dispatcherContract.unpause();
+            }
+        } else {
+            // Only pause if currently not paused, to avoid revert from EnforcedPause()
+            if (!dispatcherContract.paused()) {
+                dispatcherContract.pause();
+            }
+        }
+
+        emit DispatcherActiveChanged(dispatcher, active);
     }
 }
