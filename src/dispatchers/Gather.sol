@@ -58,10 +58,12 @@ contract Gather is ATokenDispatcher {
     /// @param minter The NFTMinter contract address.
     /// @param amount The amount of prime token to gather.
     function dispatch(address minter, uint256 amount) external override whenNotPaused {
-        // Pull the prime token from the minter
+        // Pull the prime token from the minter (balance-before/after for FOT safety)
+        uint256 balanceBefore = IERC20(_token).balanceOf(address(this));
         IERC20(_token).transferFrom(minter, address(this), amount);
+        uint256 actualReceived = IERC20(_token).balanceOf(address(this)) - balanceBefore;
 
-        // Forward to the recipient
-        IERC20(_token).transfer(_recipient, amount);
+        // Forward actual received amount to the recipient
+        IERC20(_token).transfer(_recipient, actualReceived);
     }
 }

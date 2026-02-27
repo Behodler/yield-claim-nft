@@ -8,6 +8,7 @@ import {IUnlockCallback} from "../src/interfaces/balancer/IUnlockCallback.sol";
 import {AddLiquidityParams, AddLiquidityKind} from "../src/interfaces/balancer/BalancerTypes.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {MockFOTToken} from "./mocks/MockFOTToken.sol";
 
 /// @dev Mock ERC20 with configurable decimals for testing.
 contract MockERC20 is ERC20 {
@@ -385,6 +386,175 @@ contract BalancerPoolerTest is Test {
     function test_unlockCallback_revertsIfCallerIsNotVault() public {
         vm.prank(nonOwner);
         vm.expectRevert("BalancerPooler: caller is not vault");
-        pooler.unlockCallback(abi.encode(uint256(100e18), uint256(100e18)));
+        pooler.unlockCallback(abi.encode(uint256(100e18)));
+    }
+
+    // =========================================================================
+    // dispatch tests - settlement amounts match actual vault receipts
+    // =========================================================================
+
+    function test_dispatch_settlementAmountsMatchVaultReceipts() public {
+        uint256 amount = 100e18;
+        primeToken.mint(minter, amount);
+
+        vm.prank(minter);
+        primeToken.approve(address(pooler), type(uint256).max);
+
+        pooler.dispatch(minter, amount);
+
+        // Both settlements should match actual amounts
+        uint256 settlementsCount = mockVault.getSettlementsCount();
+        assertEq(settlementsCount, 2, "Should have 2 settlements (prime + phUSD)");
+
+        // First settlement: primeToken
+        (address settledToken0, uint256 settledAmount0) = mockVault.getSettlement(0);
+        assertEq(settledToken0, address(primeToken), "First settlement should be primeToken");
+        assertEq(settledAmount0, amount, "Prime settlement amount should match transferred amount");
+
+        // Second settlement: phUSD
+        (address settledToken1, uint256 settledAmount1) = mockVault.getSettlement(1);
+        assertEq(settledToken1, address(phUSDToken), "Second settlement should be phUSD");
+        assertEq(settledAmount1, amount, "phUSD settlement amount should match for same decimals");
+    }
+
+    // =========================================================================
+    // FOT token dispatch tests
+    // =========================================================================
+
+    function test_dispatch_FOTToken_noRevert_phUSDMintedInCallback() public {
+        // Create an FOT prime token (2% fee)
+        MockFOTToken fotToken = new MockFOTToken("FOT Token", "FOT", 200);
+        MockBalancerVault vault2 = new MockBalancerVault();
+
+        BalancerPooler fotPooler = new BalancerPooler(
+            address(fotToken),
+            address(phUSDToken),
+            pool,
+            address(vault2),
+            true,
+            "Pool FOT/phUSD",
+            owner
+        );
+
+        uint256 amount = 100e18;
+        fotToken.mint(minter, amount);
+
+        vm.prank(minter);
+        fotToken.approve(address(fotPooler), type(uint256).max);
+
+        // Before dispatch, phUSD totalSupply is 0
+        assertEq(phUSDToken.totalSupply(), 0);
+
+        // Should not revert
+        fotPooler.dispatch(minter, amount);
+
+        // phUSD should have been minted (in callback)
+        assertTrue(phUSDToken.totalSupply() > 0, "phUSD should have been minted in callback");
+
+        // addLiquidity should have been called
+        assertTrue(vault2.addLiquidityCalled(), "addLiquidity should have been called");
+    }
+
+    function test_dispatch_FOTToken_settlementAmountsMatchActualVaultReceipts() public {
+        // Create an FOT prime token (2% fee = 200 bps)
+        MockFOTToken fotToken = new MockFOTToken("FOT Token", "FOT", 200);
+        MockBalancerVault vault2 = new MockBalancerVault();
+
+        BalancerPooler fotPooler = new BalancerPooler(
+            address(fotToken),
+            address(phUSDToken),
+            pool,
+            address(vault2),
+            true,
+            "Pool FOT/phUSD",
+            owner
+        );
+
+        uint256 amount = 100e18;
+        fotToken.mint(minter, amount);
+
+        vm.prank(minter);
+        fotToken.approve(address(fotPooler), type(uint256).max);
+
+        fotPooler.dispatch(minter, amount);
+
+        // First transfer: minter -> pooler (2% fee)
+        // actualReceived by pooler = 100e18 - 2e18 = 98e18
+        // Second transfer: pooler -> vault (2% fee on 98e18)
+        // actualPrimeInVault = 98e18 - (98e18 * 200 / 10000) = 98e18 - 1.96e18 = 96.04e18
+        uint256 expectedPrimeInVault = 9604e16; // 96.04e18
+
+        // Check settlements
+        (address settledToken0, uint256 settledAmount0) = vault2.getSettlement(0);
+        assertEq(settledToken0, address(fotToken), "First settlement should be FOT primeToken");
+        assertEq(settledAmount0, expectedPrimeInVault, "Prime settlement should match actual vault receipt after double FOT fee");
+
+        (address settledToken1, uint256 settledAmount1) = vault2.getSettlement(1);
+        assertEq(settledToken1, address(phUSDToken), "Second settlement should be phUSD");
+        assertEq(settledAmount1, expectedPrimeInVault, "phUSD settlement should match normalized actualPrimeInVault");
+
+        // maxAmountsIn should also match
+        uint256[] memory amounts = vault2.getLastParamsMaxAmountsIn();
+        assertEq(amounts[0], expectedPrimeInVault, "maxAmountsIn[0] should be actualPrimeInVault");
+        assertEq(amounts[1], expectedPrimeInVault, "maxAmountsIn[1] should be phUSDAmount matching actualPrimeInVault");
+    }
+
+    function test_dispatch_FOTToken_noStuckTokensInPooler() public {
+        // Create an FOT prime token (5% fee = 500 bps)
+        MockFOTToken fotToken = new MockFOTToken("FOT Token", "FOT", 500);
+        MockBalancerVault vault2 = new MockBalancerVault();
+
+        BalancerPooler fotPooler = new BalancerPooler(
+            address(fotToken),
+            address(phUSDToken),
+            pool,
+            address(vault2),
+            true,
+            "Pool FOT/phUSD",
+            owner
+        );
+
+        uint256 amount = 100e18;
+        fotToken.mint(minter, amount);
+
+        vm.prank(minter);
+        fotToken.approve(address(fotPooler), type(uint256).max);
+
+        fotPooler.dispatch(minter, amount);
+
+        // No tokens should be stuck in the pooler
+        assertEq(fotToken.balanceOf(address(fotPooler)), 0, "No FOT tokens should be stuck in pooler");
+        assertEq(phUSDToken.balanceOf(address(fotPooler)), 0, "No phUSD should be stuck in pooler");
+    }
+
+    function test_dispatch_standardToken_stillWorksIdentically() public {
+        // This tests that a standard (non-FOT) token still works correctly after changes
+        uint256 amount = 100e18;
+        primeToken.mint(minter, amount);
+
+        vm.prank(minter);
+        primeToken.approve(address(pooler), type(uint256).max);
+
+        pooler.dispatch(minter, amount);
+
+        // Verify standard behavior
+        assertTrue(mockVault.addLiquidityCalled(), "addLiquidity should have been called");
+
+        // Vault should hold both tokens
+        assertEq(primeToken.balanceOf(address(mockVault)), amount, "Vault should hold full primeToken amount");
+        assertEq(phUSDToken.balanceOf(address(mockVault)), amount, "Vault should hold matching phUSD amount");
+
+        // Nothing stuck in pooler
+        assertEq(primeToken.balanceOf(address(pooler)), 0, "No primeTokens should be stuck in pooler");
+        assertEq(phUSDToken.balanceOf(address(pooler)), 0, "No phUSD should be stuck in pooler");
+
+        // Settlements should match
+        (address settledToken0, uint256 settledAmount0) = mockVault.getSettlement(0);
+        assertEq(settledToken0, address(primeToken));
+        assertEq(settledAmount0, amount);
+
+        (address settledToken1, uint256 settledAmount1) = mockVault.getSettlement(1);
+        assertEq(settledToken1, address(phUSDToken));
+        assertEq(settledAmount1, amount);
     }
 }

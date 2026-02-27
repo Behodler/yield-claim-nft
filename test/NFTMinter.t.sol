@@ -8,6 +8,7 @@ import {ATokenDispatcher} from "../src/dispatchers/ATokenDispatcher.sol";
 import {Burner} from "../src/dispatchers/Burner.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {MockFOTToken} from "./mocks/MockFOTToken.sol";
 
 /// @dev Simple mock ERC20 for testing.
 contract MockERC20 is ERC20 {
@@ -746,5 +747,74 @@ contract NFTMinterTest is Test {
         minter.setGrowthFactor(1, 500);
         (,, uint256 growthBps) = minter.configs(1);
         assertEq(growthBps, 500);
+    }
+
+    // =========================================================================
+    // FOT token tests
+    // =========================================================================
+
+    function test_mint_FOTToken_withAccumulator_noRevert_NFTMinted() public {
+        // Create a FOT token with 2% fee (200 bps)
+        MockFOTToken fotToken = new MockFOTToken("FOT Token", "FOT", 200);
+
+        // Create Accumulator for FOT token
+        Accumulator fotAccumulator = new Accumulator(address(fotToken), "Accumulate FOT", owner);
+        fotAccumulator.setMinter(address(minter));
+
+        uint256 initialPrice = 100e18;
+        minter.registerDispatcher(address(fotAccumulator), initialPrice, 0);
+
+        // Give user tokens and approve
+        fotToken.mint(user, 1000e18);
+        vm.prank(user);
+        fotToken.approve(address(minter), type(uint256).max);
+
+        // Mint should not revert
+        vm.prank(user);
+        bool success = minter.mint(address(fotToken), 1, recipient);
+
+        assertTrue(success, "Mint should succeed with FOT token");
+        // Recipient should have 1 claim NFT
+        assertEq(minter.balanceOf(recipient, minter.CLAIM_TOKEN_ID()), 1, "Recipient should have 1 claim NFT");
+        // User loses exactly `price` from their balance (amount-fee transferred + fee burned)
+        assertEq(fotToken.balanceOf(user), 1000e18 - initialPrice, "User should have lost exactly price from balance");
+        // But minter received less than price due to FOT fee (2% of 100e18 = 2e18 burned)
+        assertEq(fotToken.balanceOf(address(minter)), 98e18, "Minter should have received price minus 2% fee");
+    }
+
+    function test_mint_FOTToken_actualReceivedLessThanPrice_passedToDispatcher() public {
+        // Create a FOT token with 5% fee (500 bps)
+        MockFOTToken fotToken = new MockFOTToken("FOT Token", "FOT", 500);
+
+        // Create Accumulator for FOT token (no-op, tokens stay in minter)
+        Accumulator fotAccumulator = new Accumulator(address(fotToken), "Accumulate FOT", owner);
+        fotAccumulator.setMinter(address(minter));
+
+        uint256 price = 100e18;
+        minter.registerDispatcher(address(fotAccumulator), price, 0);
+
+        // Give user tokens and approve
+        fotToken.mint(user, 1000e18);
+        vm.prank(user);
+        fotToken.approve(address(minter), type(uint256).max);
+
+        // Record minter balance before
+        uint256 minterBalanceBefore = fotToken.balanceOf(address(minter));
+
+        // Mint
+        vm.prank(user);
+        minter.mint(address(fotToken), 1, recipient);
+
+        // Minter should have received less than price due to FOT fee
+        uint256 minterBalanceAfter = fotToken.balanceOf(address(minter));
+        uint256 actualReceived = minterBalanceAfter - minterBalanceBefore;
+
+        // 5% fee: actualReceived should be 95e18
+        assertEq(actualReceived, 95e18, "Minter should receive price minus 5% fee");
+        assertTrue(actualReceived < price, "actualReceived should be less than price for FOT token");
+
+        // Price growth should still be based on original price (unchanged)
+        // Since growth is 0, price stays the same
+        assertEq(minter.getPrice(1), price, "Price should remain unchanged with 0 growth");
     }
 }

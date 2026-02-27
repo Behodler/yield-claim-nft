@@ -6,6 +6,7 @@ import {Gather} from "../src/dispatchers/Gather.sol";
 import {NFTMinter} from "../src/NFTMinter.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {MockFOTToken} from "./mocks/MockFOTToken.sol";
 
 /// @dev Simple mock ERC20 for testing.
 contract MockERC20 is ERC20 {
@@ -194,5 +195,47 @@ contract GatherTest is Test {
 
         // Verify NFT was minted
         assertEq(nftMinter.balanceOf(nftRecipient, nftMinter.CLAIM_TOKEN_ID()), 1, "NFT recipient should have 1 claim NFT");
+    }
+
+    // =========================================================================
+    // FOT token dispatch tests
+    // =========================================================================
+
+    function test_dispatch_FOTToken_noRevert_recipientGetsTokensAfterDoubleFee() public {
+        // Create a FOT token with 2% fee (200 bps)
+        MockFOTToken fotToken = new MockFOTToken("FOT Token", "FOT", 200);
+        Gather fotGather = new Gather(address(fotToken), recipientAddr, "Gather FOT", owner);
+
+        uint256 amount = 100e18;
+        fotToken.mint(minter, amount);
+
+        vm.prank(minter);
+        fotToken.approve(address(fotGather), type(uint256).max);
+
+        // Should not revert
+        fotGather.dispatch(minter, amount);
+
+        // transferFrom: minter -> Gather, 2% fee = 2e18 burned, Gather receives 98e18
+        // transfer: Gather -> recipient, 2% fee on 98e18 = 1.96e18 burned, recipient receives 96.04e18
+        uint256 expectedRecipientBalance = 9604e16; // 96.04e18
+
+        assertEq(fotToken.balanceOf(recipientAddr), expectedRecipientBalance, "Recipient should receive tokens after double FOT fee");
+    }
+
+    function test_dispatch_FOTToken_zeroTokensStuckInGather() public {
+        // Create a FOT token with 3% fee (300 bps)
+        MockFOTToken fotToken = new MockFOTToken("FOT Token", "FOT", 300);
+        Gather fotGather = new Gather(address(fotToken), recipientAddr, "Gather FOT", owner);
+
+        uint256 amount = 100e18;
+        fotToken.mint(minter, amount);
+
+        vm.prank(minter);
+        fotToken.approve(address(fotGather), type(uint256).max);
+
+        fotGather.dispatch(minter, amount);
+
+        // Gather should have 0 balance (all forwarded to recipient)
+        assertEq(fotToken.balanceOf(address(fotGather)), 0, "Gather should have 0 balance after FOT dispatch");
     }
 }

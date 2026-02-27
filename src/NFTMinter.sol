@@ -127,11 +127,13 @@ contract NFTMinter is ERC1155, Ownable, ITokenMinter, IPausable {
 
         uint256 price = config.price;
 
-        // Pull tokens from the user to this contract
+        // Pull tokens from the user to this contract (balance-before/after for FOT safety)
+        uint256 balanceBefore = IERC20(token).balanceOf(address(this));
         IERC20(token).transferFrom(msg.sender, address(this), price);
+        uint256 actualReceived = IERC20(token).balanceOf(address(this)) - balanceBefore;
 
-        // Invoke the dispatcher (dispatch is on ATokenDispatcher with whenNotPaused guard)
-        ATokenDispatcher(config.dispatcher).dispatch(address(this), price);
+        // Invoke the dispatcher with actual received amount (dispatch is on ATokenDispatcher with whenNotPaused guard)
+        ATokenDispatcher(config.dispatcher).dispatch(address(this), actualReceived);
 
         // Grow price: newPrice = oldPrice + (oldPrice * growthBasisPoints / 10000)
         config.price = price + (price * config.growthBasisPoints) / 10000;

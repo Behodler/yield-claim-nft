@@ -30,10 +30,12 @@ contract Burner is ATokenDispatcher {
 
     /// @notice Pulls prime tokens from the minter and burns them.
     function dispatch(address minter, uint256 amount) external override whenNotPaused {
-        // Pull the prime token from the minter
+        // Pull the prime token from the minter (balance-before/after for FOT safety)
+        uint256 balanceBefore = IERC20(_token).balanceOf(address(this));
         IERC20(_token).transferFrom(minter, address(this), amount);
+        uint256 actualReceived = IERC20(_token).balanceOf(address(this)) - balanceBefore;
 
-        // Burn the tokens
-        IBurnable(_token).burn(amount);
+        // Burn the actual received amount
+        IBurnable(_token).burn(actualReceived);
     }
 }

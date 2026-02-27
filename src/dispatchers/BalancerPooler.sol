@@ -59,12 +59,14 @@ contract BalancerPooler is ATokenDispatcher, IUnlockCallback {
         return _vault;
     }
 
-    /// @notice Dispatches tokens: pulls primeToken from minter, mints matching phUSD, and donates both to Balancer pool.
+    /// @notice Dispatches tokens: pulls primeToken from minter and donates both primeToken and phUSD to Balancer pool.
     function dispatch(address minter, uint256 amount) external override whenNotPaused {
+        // Pull primeToken from minter (balance-before/after for FOT safety)
+        uint256 balanceBefore = IERC20(_primeToken).balanceOf(address(this));
         IERC20(_primeToken).transferFrom(minter, address(this), amount);
-        uint256 phUSDAmount = _normalizeToPhUSD(amount);
-        IMintable(_phUSD).mint(address(this), phUSDAmount);
-        bytes memory data = abi.encode(amount, phUSDAmount);
+        uint256 actualReceived = IERC20(_primeToken).balanceOf(address(this)) - balanceBefore;
+
+        bytes memory data = abi.encode(actualReceived);
         IBalancerVault(_vault).unlock(data);
     }
 
@@ -72,15 +74,25 @@ contract BalancerPooler is ATokenDispatcher, IUnlockCallback {
     function unlockCallback(bytes calldata data) external returns (bytes memory) {
         require(msg.sender == _vault, "BalancerPooler: caller is not vault");
 
-        (uint256 primeAmount, uint256 phUSDAmount) = abi.decode(data, (uint256, uint256));
+        uint256 primeAmount = abi.decode(data, (uint256));
+
+        // Transfer primeToken to vault (balance-before/after for FOT safety)
+        uint256 vaultPrimeBefore = IERC20(_primeToken).balanceOf(_vault);
+        IERC20(_primeToken).transfer(_vault, primeAmount);
+        uint256 actualPrimeInVault = IERC20(_primeToken).balanceOf(_vault) - vaultPrimeBefore;
+
+        // Mint phUSD based on actual prime received by vault
+        uint256 phUSDAmount = _normalizeToPhUSD(actualPrimeInVault);
+        IMintable(_phUSD).mint(address(this), phUSDAmount);
+        IERC20(_phUSD).transfer(_vault, phUSDAmount);
 
         uint256[] memory maxAmountsIn = new uint256[](2);
         if (_primeTokenIsFirst) {
-            maxAmountsIn[0] = primeAmount;
+            maxAmountsIn[0] = actualPrimeInVault;
             maxAmountsIn[1] = phUSDAmount;
         } else {
             maxAmountsIn[0] = phUSDAmount;
-            maxAmountsIn[1] = primeAmount;
+            maxAmountsIn[1] = actualPrimeInVault;
         }
 
         AddLiquidityParams memory params = AddLiquidityParams({
@@ -93,11 +105,7 @@ contract BalancerPooler is ATokenDispatcher, IUnlockCallback {
         });
 
         IBalancerVault(_vault).addLiquidity(params);
-
-        IERC20(_primeToken).transfer(_vault, primeAmount);
-        IBalancerVault(_vault).settle(IERC20(_primeToken), primeAmount);
-
-        IERC20(_phUSD).transfer(_vault, phUSDAmount);
+        IBalancerVault(_vault).settle(IERC20(_primeToken), actualPrimeInVault);
         IBalancerVault(_vault).settle(IERC20(_phUSD), phUSDAmount);
 
         return "";
