@@ -2,36 +2,29 @@
 pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {ATokenDispatcher} from "./ATokenDispatcher.sol";
 import {ITokenDispatcher} from "../interfaces/ITokenDispatcher.sol";
+import {IMintable} from "../interfaces/IMintable.sol";
 import {IBalancerVault} from "../interfaces/balancer/IBalancerVault.sol";
 import {IUnlockCallback} from "../interfaces/balancer/IUnlockCallback.sol";
 import {AddLiquidityParams, AddLiquidityKind} from "../interfaces/balancer/BalancerTypes.sol";
 
 /// @title BalancerPooler
-/// @notice A token dispatcher that accumulates tokens in the minter until thresholds are met,
-///         then donates both prime and matching tokens to a Balancer V3 pool at a 1:1 ratio.
-///         Because tokens balances are usually not in a 1:1 ratio, there will be some leftover of 1 token. This is just left in minter to accumulate.
+/// @notice A token dispatcher that mints phUSD to match incoming prime token amounts,
+///         then donates both tokens to a Balancer V3 pool.
 /// @dev Implements IUnlockCallback to interact with the Balancer V3 vault's unlock pattern.
 contract BalancerPooler is ATokenDispatcher, IUnlockCallback {
     address private immutable _primeToken;
-    address private immutable _matchingToken;
+    address private immutable _phUSD;
     address private immutable _pool;
     address private immutable _vault;
     bool private immutable _primeTokenIsFirst;
     string private _flavour;
 
-    /// @notice Minimum amount of prime token on the minter before pooling is triggered.
-    uint256 public primeTokenThreshold;
-
-    /// @notice Minimum amount of matching token on the minter before pooling is triggered.
-    uint256 public matchingTokenThreshold;
-
-    event ThresholdsUpdated(uint256 primeTokenThreshold, uint256 matchingTokenThreshold);
-
     constructor(
         address primeToken_,
-        address matchingToken_,
+        address phUSD_,
         address pool_,
         address vault_,
         bool primeTokenIsFirst_,
@@ -39,32 +32,11 @@ contract BalancerPooler is ATokenDispatcher, IUnlockCallback {
         address initialOwner
     ) ATokenDispatcher(initialOwner) {
         _primeToken = primeToken_;
-        _matchingToken = matchingToken_;
+        _phUSD = phUSD_;
         _pool = pool_;
         _vault = vault_;
         _primeTokenIsFirst = primeTokenIsFirst_;
         _flavour = flavour_;
-    }
-
-    /// @notice Sets the prime token threshold. Only callable by owner.
-    /// @param threshold The new threshold value.
-    function setPrimeTokenThreshold(uint256 threshold) external onlyOwner {
-        primeTokenThreshold = threshold;
-        emit ThresholdsUpdated(primeTokenThreshold, matchingTokenThreshold);
-    }
-
-    /// @notice Sets the matching token threshold. Only callable by owner.
-    /// @param threshold The new threshold value.
-    function setMatchingTokenThreshold(uint256 threshold) external onlyOwner {
-        matchingTokenThreshold = threshold;
-        emit ThresholdsUpdated(primeTokenThreshold, matchingTokenThreshold);
-    }
-
-    /// @inheritdoc ITokenDispatcher
-    function tokensToApprove() external view returns (address[] memory) {
-        address[] memory tokens = new address[](1);
-        tokens[0] = _matchingToken;
-        return tokens;
     }
 
     /// @inheritdoc ITokenDispatcher
@@ -77,42 +49,39 @@ contract BalancerPooler is ATokenDispatcher, IUnlockCallback {
         return _flavour;
     }
 
+    /// @notice Returns the phUSD token address.
+    function phUSD() external view returns (address) {
+        return _phUSD;
+    }
+
     /// @notice Returns the Balancer vault address.
     function vault() external view returns (address) {
         return _vault;
     }
 
-    /// @notice Dispatches tokens: if both thresholds are met, donates to Balancer pool at 1:1 ratio.
+    /// @notice Dispatches tokens: pulls primeToken from minter, mints matching phUSD, and donates both to Balancer pool.
     function dispatch(address minter, uint256 amount) external override whenNotPaused {
-        // Check if both thresholds are met on the minter
-        uint256 primeBalance = IERC20(_primeToken).balanceOf(minter);
-        uint256 matchingBalance = IERC20(_matchingToken).balanceOf(minter);
-
-        if (primeBalance >= primeTokenThreshold && matchingBalance >= matchingTokenThreshold) {
-            // 1:1 ratio: donate the minimum of both balances
-            uint256 donateAmount = primeBalance < matchingBalance ? primeBalance : matchingBalance;
-
-            // Transfer only equal amounts from minter (remainder stays in minter)
-            IERC20(_primeToken).transferFrom(minter, address(this), donateAmount);
-            IERC20(_matchingToken).transferFrom(minter, address(this), donateAmount);
-
-            // Initiate Balancer V3 unlock flow for donation
-            bytes memory data = abi.encode(donateAmount);
-            IBalancerVault(_vault).unlock(data);
-        }
-        // If thresholds not met, do nothing. Tokens accumulate in the minter.
+        IERC20(_primeToken).transferFrom(minter, address(this), amount);
+        uint256 phUSDAmount = _normalizeToPhUSD(amount);
+        IMintable(_phUSD).mint(address(this), phUSDAmount);
+        bytes memory data = abi.encode(amount, phUSDAmount);
+        IBalancerVault(_vault).unlock(data);
     }
 
     /// @inheritdoc IUnlockCallback
-    function unlockCallback(bytes calldata data) external returns (bytes memory result) {
+    function unlockCallback(bytes calldata data) external returns (bytes memory) {
         require(msg.sender == _vault, "BalancerPooler: caller is not vault");
 
-        uint256 donateAmount = abi.decode(data, (uint256));
+        (uint256 primeAmount, uint256 phUSDAmount) = abi.decode(data, (uint256, uint256));
 
-        // Build amounts array: both slots get the same donateAmount (1:1 ratio)
         uint256[] memory maxAmountsIn = new uint256[](2);
-        maxAmountsIn[0] = donateAmount;
-        maxAmountsIn[1] = donateAmount;
+        if (_primeTokenIsFirst) {
+            maxAmountsIn[0] = primeAmount;
+            maxAmountsIn[1] = phUSDAmount;
+        } else {
+            maxAmountsIn[0] = phUSDAmount;
+            maxAmountsIn[1] = primeAmount;
+        }
 
         AddLiquidityParams memory params = AddLiquidityParams({
             pool: _pool,
@@ -125,16 +94,25 @@ contract BalancerPooler is ATokenDispatcher, IUnlockCallback {
 
         IBalancerVault(_vault).addLiquidity(params);
 
-        // Transfer tokens to vault and settle
-        IERC20 primeERC20 = IERC20(_primeToken);
-        IERC20 matchingERC20 = IERC20(_matchingToken);
+        IERC20(_primeToken).transfer(_vault, primeAmount);
+        IBalancerVault(_vault).settle(IERC20(_primeToken), primeAmount);
 
-        primeERC20.transfer(_vault, donateAmount);
-        IBalancerVault(_vault).settle(primeERC20, donateAmount);
-
-        matchingERC20.transfer(_vault, donateAmount);
-        IBalancerVault(_vault).settle(matchingERC20, donateAmount);
+        IERC20(_phUSD).transfer(_vault, phUSDAmount);
+        IBalancerVault(_vault).settle(IERC20(_phUSD), phUSDAmount);
 
         return "";
+    }
+
+    /// @notice Normalizes a prime token amount to phUSD decimals.
+    /// @param primeAmount The amount in prime token decimals.
+    /// @return The equivalent amount in phUSD decimals.
+    function _normalizeToPhUSD(uint256 primeAmount) internal view returns (uint256) {
+        uint8 primeDecimals = IERC20Metadata(_primeToken).decimals();
+        uint8 phUSDDecimals = IERC20Metadata(_phUSD).decimals();
+        if (primeDecimals == phUSDDecimals) return primeAmount;
+        if (primeDecimals < phUSDDecimals) {
+            return primeAmount * 10 ** (phUSDDecimals - primeDecimals);
+        }
+        return primeAmount / 10 ** (primeDecimals - phUSDDecimals);
     }
 }
