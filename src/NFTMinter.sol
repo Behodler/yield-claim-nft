@@ -64,13 +64,7 @@ contract NFTMinter is ERC1155, Ownable, ITokenMinter {
         // Read prime token from dispatcher
         address token = ITokenDispatcher(dispatcher).primeToken();
 
-        // Read tokens the dispatcher needs approval for and approve max uint
-        address[] memory tokensForApproval = ITokenDispatcher(dispatcher).tokensToApprove();
-        for (uint256 i = 0; i < tokensForApproval.length; i++) {
-            IERC20(tokensForApproval[i]).approve(dispatcher, type(uint256).max);
-        }
-
-        // Also approve the prime token for the dispatcher (so dispatcher can pull it from minter)
+        // Approve the prime token for the dispatcher (so dispatcher can pull it from minter)
         IERC20(token).approve(dispatcher, type(uint256).max);
 
         // Store configuration

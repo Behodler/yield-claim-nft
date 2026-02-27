@@ -4,18 +4,44 @@ pragma solidity ^0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {BalancerPooler} from "../src/dispatchers/BalancerPooler.sol";
 import {ITokenDispatcher} from "../src/interfaces/ITokenDispatcher.sol";
+import {IMintable} from "../src/interfaces/IMintable.sol";
 import {IUnlockCallback} from "../src/interfaces/balancer/IUnlockCallback.sol";
 import {IBalancerVault} from "../src/interfaces/balancer/IBalancerVault.sol";
 import {AddLiquidityParams, AddLiquidityKind} from "../src/interfaces/balancer/BalancerTypes.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-/// @dev Simple mock ERC20 for testing.
+/// @dev Mock ERC20 with configurable decimals for testing.
 contract MockERC20 is ERC20 {
-    constructor(string memory name_, string memory symbol_) ERC20(name_, symbol_) {}
+    uint8 private _customDecimals;
+
+    constructor(string memory name_, string memory symbol_, uint8 decimals_) ERC20(name_, symbol_) {
+        _customDecimals = decimals_;
+    }
 
     function mint(address to, uint256 amount) external {
         _mint(to, amount);
+    }
+
+    function decimals() public view override returns (uint8) {
+        return _customDecimals;
+    }
+}
+
+/// @dev Mock ERC20 that implements IMintable (represents phUSD). Actually mints tokens.
+contract MockMintableToken is ERC20, IMintable {
+    uint8 private _customDecimals;
+
+    constructor(string memory name_, string memory symbol_, uint8 decimals_) ERC20(name_, symbol_) {
+        _customDecimals = decimals_;
+    }
+
+    function mint(address recipient, uint256 amount) external override {
+        _mint(recipient, amount);
+    }
+
+    function decimals() public view override returns (uint8) {
+        return _customDecimals;
     }
 }
 
@@ -100,7 +126,7 @@ contract MockBalancerVault {
 contract BalancerPoolerTest is Test {
     BalancerPooler public pooler;
     MockERC20 public primeToken;
-    MockERC20 public matchingToken;
+    MockMintableToken public phUSDToken;
     MockBalancerVault public mockVault;
     address public pool = address(0xA001);
     address public owner = address(this);
@@ -108,64 +134,18 @@ contract BalancerPoolerTest is Test {
     address public nonOwner = address(0xCAFE);
 
     function setUp() public {
-        primeToken = new MockERC20("Prime Token", "PRM");
-        matchingToken = new MockERC20("Matching Token", "MTH");
+        primeToken = new MockERC20("Prime Token", "PRM", 18);
+        phUSDToken = new MockMintableToken("phUSD", "phUSD", 18);
         mockVault = new MockBalancerVault();
         pooler = new BalancerPooler(
             address(primeToken),
-            address(matchingToken),
+            address(phUSDToken),
             pool,
             address(mockVault),
             true, // primeTokenIsFirst
-            "Pool PRM/MTH",
+            "Pool PRM/phUSD",
             owner
         );
-    }
-
-    // =========================================================================
-    // Threshold configuration tests
-    // =========================================================================
-
-    function test_setPrimeTokenThreshold_ownerCanSet() public {
-        pooler.setPrimeTokenThreshold(100e18);
-        assertEq(pooler.primeTokenThreshold(), 100e18);
-    }
-
-    function test_setMatchingTokenThreshold_ownerCanSet() public {
-        pooler.setMatchingTokenThreshold(200e18);
-        assertEq(pooler.matchingTokenThreshold(), 200e18);
-    }
-
-    function test_setPrimeTokenThreshold_nonOwnerReverts() public {
-        vm.prank(nonOwner);
-        vm.expectRevert();
-        pooler.setPrimeTokenThreshold(100e18);
-    }
-
-    function test_setMatchingTokenThreshold_nonOwnerReverts() public {
-        vm.prank(nonOwner);
-        vm.expectRevert();
-        pooler.setMatchingTokenThreshold(200e18);
-    }
-
-    function test_setThresholds_emitsEvent() public {
-        vm.expectEmit(false, false, false, true);
-        emit BalancerPooler.ThresholdsUpdated(100e18, 0);
-        pooler.setPrimeTokenThreshold(100e18);
-
-        vm.expectEmit(false, false, false, true);
-        emit BalancerPooler.ThresholdsUpdated(100e18, 200e18);
-        pooler.setMatchingTokenThreshold(200e18);
-    }
-
-    // =========================================================================
-    // tokensToApprove tests
-    // =========================================================================
-
-    function test_tokensToApprove_returnsMatchingToken() public view {
-        address[] memory tokens = pooler.tokensToApprove();
-        assertEq(tokens.length, 1);
-        assertEq(tokens[0], address(matchingToken));
     }
 
     // =========================================================================
@@ -181,7 +161,7 @@ contract BalancerPoolerTest is Test {
     // =========================================================================
 
     function test_flavour_returnsCorrectString() public view {
-        assertEq(pooler.flavour(), "Pool PRM/MTH");
+        assertEq(pooler.flavour(), "Pool PRM/phUSD");
     }
 
     // =========================================================================
@@ -193,102 +173,195 @@ contract BalancerPoolerTest is Test {
     }
 
     // =========================================================================
-    // dispatch tests - thresholds NOT met
+    // phUSD() getter test
     // =========================================================================
 
-    function test_dispatch_bothThresholdsNotMet_noTransfers() public {
-        pooler.setPrimeTokenThreshold(100e18);
-        pooler.setMatchingTokenThreshold(100e18);
-
-        // Give minter some tokens but below thresholds
-        primeToken.mint(minter, 50e18);
-        matchingToken.mint(minter, 50e18);
-
-        // Approve pooler to pull from minter
-        vm.startPrank(minter);
-        primeToken.approve(address(pooler), type(uint256).max);
-        matchingToken.approve(address(pooler), type(uint256).max);
-        vm.stopPrank();
-
-        // Dispatch - should do nothing since thresholds not met
-        pooler.dispatch(minter, 10e18);
-
-        // Balances should be unchanged
-        assertEq(primeToken.balanceOf(minter), 50e18);
-        assertEq(matchingToken.balanceOf(minter), 50e18);
-        assertEq(primeToken.balanceOf(address(pooler)), 0);
-        assertEq(matchingToken.balanceOf(address(pooler)), 0);
-    }
-
-    function test_dispatch_primeThresholdMetButMatchingNot_noTransfers() public {
-        pooler.setPrimeTokenThreshold(100e18);
-        pooler.setMatchingTokenThreshold(100e18);
-
-        // Prime meets threshold, matching does not
-        primeToken.mint(minter, 100e18);
-        matchingToken.mint(minter, 50e18);
-
-        vm.startPrank(minter);
-        primeToken.approve(address(pooler), type(uint256).max);
-        matchingToken.approve(address(pooler), type(uint256).max);
-        vm.stopPrank();
-
-        pooler.dispatch(minter, 10e18);
-
-        // No transfers should occur
-        assertEq(primeToken.balanceOf(minter), 100e18);
-        assertEq(matchingToken.balanceOf(minter), 50e18);
-        assertEq(primeToken.balanceOf(address(pooler)), 0);
-        assertEq(matchingToken.balanceOf(address(pooler)), 0);
+    function test_phUSD_returnsCorrectAddress() public view {
+        assertEq(pooler.phUSD(), address(phUSDToken));
     }
 
     // =========================================================================
-    // dispatch tests - both thresholds met: 1:1 ratio transfers
+    // dispatch tests - always donates (no threshold gating)
     // =========================================================================
 
-    function test_dispatch_bothThresholdsMet_transfersTokens() public {
-        pooler.setPrimeTokenThreshold(100e18);
-        pooler.setMatchingTokenThreshold(100e18);
+    function test_dispatch_alwaysDonates_noThresholdGating() public {
+        uint256 amount = 1e18;
+        primeToken.mint(minter, amount);
 
-        // Both meet thresholds, prime < matching
-        primeToken.mint(minter, 150e18);
-        matchingToken.mint(minter, 200e18);
-
-        vm.startPrank(minter);
+        vm.prank(minter);
         primeToken.approve(address(pooler), type(uint256).max);
-        matchingToken.approve(address(pooler), type(uint256).max);
-        vm.stopPrank();
 
-        pooler.dispatch(minter, 10e18);
+        pooler.dispatch(minter, amount);
 
-        // 1:1 ratio: donateAmount = min(150, 200) = 150
-        // Prime: 150 donated, 0 remaining in minter
-        // Matching: 150 donated, 50 remaining in minter
-        // Tokens end up in vault after settle
-        assertEq(primeToken.balanceOf(minter), 0, "All prime transferred (was the min)");
-        assertEq(matchingToken.balanceOf(minter), 50e18, "Surplus matching stays in minter");
-        assertEq(primeToken.balanceOf(address(mockVault)), 150e18, "Prime tokens settled in vault");
-        assertEq(matchingToken.balanceOf(address(mockVault)), 150e18, "Matching tokens settled in vault");
+        // Verify addLiquidity was called (donation happened)
+        assertTrue(mockVault.addLiquidityCalled(), "addLiquidity should have been called even for small amounts");
+    }
+
+    // =========================================================================
+    // dispatch tests - mints phUSD
+    // =========================================================================
+
+    function test_dispatch_mintsPhUSD() public {
+        uint256 amount = 100e18;
+        primeToken.mint(minter, amount);
+
+        vm.prank(minter);
+        primeToken.approve(address(pooler), type(uint256).max);
+
+        // Before dispatch, phUSD totalSupply is 0
+        assertEq(phUSDToken.totalSupply(), 0);
+
+        pooler.dispatch(minter, amount);
+
+        // phUSD was minted to pooler then transferred to vault during settlement
+        // So vault should hold the phUSD now
+        assertEq(phUSDToken.balanceOf(address(mockVault)), amount, "Vault should hold minted phUSD after settlement");
+    }
+
+    // =========================================================================
+    // dispatch tests - decimal normalization (18-to-18)
+    // =========================================================================
+
+    function test_dispatch_sameDecimals_equalRawAmounts() public {
+        // Both tokens are 18 decimals (setUp default)
+        uint256 amount = 50e18;
+        primeToken.mint(minter, amount);
+
+        vm.prank(minter);
+        primeToken.approve(address(pooler), type(uint256).max);
+
+        pooler.dispatch(minter, amount);
+
+        // With same decimals, phUSD amount should equal prime amount
+        uint256[] memory amounts = mockVault.getLastParamsMaxAmountsIn();
+        // primeTokenIsFirst = true, so amounts[0] = primeAmount, amounts[1] = phUSDAmount
+        assertEq(amounts[0], amount, "Prime amount should be 50e18");
+        assertEq(amounts[1], amount, "phUSD amount should equal prime amount for same decimals");
+    }
+
+    // =========================================================================
+    // dispatch tests - decimal normalization (6-to-18)
+    // =========================================================================
+
+    function test_dispatch_6to18_normalizes() public {
+        // Create 6-decimal prime token and 18-decimal phUSD
+        MockERC20 primeToken6 = new MockERC20("USDC-like", "USDC", 6);
+        MockMintableToken phUSD18 = new MockMintableToken("phUSD", "phUSD", 18);
+        MockBalancerVault vault2 = new MockBalancerVault();
+
+        BalancerPooler pooler6 = new BalancerPooler(
+            address(primeToken6),
+            address(phUSD18),
+            pool,
+            address(vault2),
+            true,
+            "Pool USDC/phUSD",
+            owner
+        );
+
+        uint256 amount = 100e6; // 100 USDC (6 decimals)
+        primeToken6.mint(minter, amount);
+
+        vm.prank(minter);
+        primeToken6.approve(address(pooler6), type(uint256).max);
+
+        pooler6.dispatch(minter, amount);
+
+        uint256[] memory amounts = vault2.getLastParamsMaxAmountsIn();
+        // primeTokenIsFirst = true
+        assertEq(amounts[0], 100e6, "Prime amount in prime decimals");
+        assertEq(amounts[1], 100e18, "phUSD amount should be primeAmount * 10^12 for 6-to-18 normalization");
+    }
+
+    // =========================================================================
+    // dispatch tests - donation amounts in respective decimals
+    // =========================================================================
+
+    function test_dispatch_donationAmountsInRespectiveDecimals() public {
+        // Create 6-decimal prime token and 18-decimal phUSD
+        MockERC20 primeToken6 = new MockERC20("USDC-like", "USDC", 6);
+        MockMintableToken phUSD18 = new MockMintableToken("phUSD", "phUSD", 18);
+        MockBalancerVault vault2 = new MockBalancerVault();
+
+        BalancerPooler pooler6 = new BalancerPooler(
+            address(primeToken6),
+            address(phUSD18),
+            pool,
+            address(vault2),
+            true,
+            "Pool USDC/phUSD",
+            owner
+        );
+
+        uint256 primeAmount = 50e6; // 50 USDC
+        primeToken6.mint(minter, primeAmount);
+
+        vm.prank(minter);
+        primeToken6.approve(address(pooler6), type(uint256).max);
+
+        pooler6.dispatch(minter, primeAmount);
+
+        // Check that vault received correct amounts in their respective decimals
+        assertEq(primeToken6.balanceOf(address(vault2)), 50e6, "Prime token donated in prime decimals (6)");
+        assertEq(phUSD18.balanceOf(address(vault2)), 50e18, "phUSD donated in phUSD decimals (18)");
+    }
+
+    // =========================================================================
+    // dispatch tests - token ordering
+    // =========================================================================
+
+    function test_dispatch_primeTokenIsFirst_correctOrdering() public {
+        // Default setUp has primeTokenIsFirst = true
+        uint256 amount = 75e18;
+        primeToken.mint(minter, amount);
+
+        vm.prank(minter);
+        primeToken.approve(address(pooler), type(uint256).max);
+
+        pooler.dispatch(minter, amount);
+
+        uint256[] memory amounts = mockVault.getLastParamsMaxAmountsIn();
+        assertEq(amounts[0], amount, "maxAmountsIn[0] should be primeAmount when primeTokenIsFirst=true");
+        assertEq(amounts[1], amount, "maxAmountsIn[1] should be phUSDAmount when primeTokenIsFirst=true");
+    }
+
+    function test_dispatch_primeTokenIsSecond_correctOrdering() public {
+        // Create pooler with primeTokenIsFirst = false
+        BalancerPooler poolerReversed = new BalancerPooler(
+            address(primeToken),
+            address(phUSDToken),
+            pool,
+            address(mockVault),
+            false, // primeTokenIsFirst = false
+            "Pool phUSD/PRM",
+            owner
+        );
+
+        uint256 amount = 60e18;
+        primeToken.mint(minter, amount);
+
+        vm.prank(minter);
+        primeToken.approve(address(poolerReversed), type(uint256).max);
+
+        poolerReversed.dispatch(minter, amount);
+
+        uint256[] memory amounts = mockVault.getLastParamsMaxAmountsIn();
+        assertEq(amounts[0], amount, "maxAmountsIn[0] should be phUSDAmount when primeTokenIsFirst=false");
+        assertEq(amounts[1], amount, "maxAmountsIn[1] should be primeAmount when primeTokenIsFirst=false");
     }
 
     // =========================================================================
     // dispatch tests - donation via vault
     // =========================================================================
 
-    /// @notice Verifies that dispatch triggers the vault unlock flow and calls addLiquidity with DONATION kind.
     function test_dispatch_donatesViaVault() public {
-        pooler.setPrimeTokenThreshold(100e18);
-        pooler.setMatchingTokenThreshold(100e18);
+        uint256 amount = 100e18;
+        primeToken.mint(minter, amount);
 
-        primeToken.mint(minter, 100e18);
-        matchingToken.mint(minter, 100e18);
-
-        vm.startPrank(minter);
+        vm.prank(minter);
         primeToken.approve(address(pooler), type(uint256).max);
-        matchingToken.approve(address(pooler), type(uint256).max);
-        vm.stopPrank();
 
-        pooler.dispatch(minter, 10e18);
+        pooler.dispatch(minter, amount);
 
         // Verify addLiquidity was called
         assertTrue(mockVault.addLiquidityCalled(), "addLiquidity should have been called");
@@ -299,140 +372,21 @@ contract BalancerPoolerTest is Test {
             uint256(AddLiquidityKind.DONATION),
             "addLiquidity should use DONATION kind"
         );
-    }
 
-    /// @notice Verifies that donation uses the correct pool address.
-    function test_dispatch_donationUsesCorrectPool() public {
-        primeToken.mint(minter, 100e18);
-        matchingToken.mint(minter, 100e18);
-
-        vm.startPrank(minter);
-        primeToken.approve(address(pooler), type(uint256).max);
-        matchingToken.approve(address(pooler), type(uint256).max);
-        vm.stopPrank();
-
-        pooler.dispatch(minter, 10e18);
-
+        // Verify correct pool
         assertEq(mockVault.getLastParamsPool(), pool, "Donation should use the correct pool address");
-    }
 
-    /// @notice Verifies donation sets minBptAmountOut to 0.
-    function test_dispatch_donationSetsMinBptAmountOutToZero() public {
-        primeToken.mint(minter, 100e18);
-        matchingToken.mint(minter, 100e18);
-
-        vm.startPrank(minter);
-        primeToken.approve(address(pooler), type(uint256).max);
-        matchingToken.approve(address(pooler), type(uint256).max);
-        vm.stopPrank();
-
-        pooler.dispatch(minter, 10e18);
-
+        // Verify minBptAmountOut is 0
         assertEq(mockVault.getLastParamsMinBptAmountOut(), 0, "minBptAmountOut should be 0 for donation");
-    }
-
-    // =========================================================================
-    // dispatch tests - 1:1 ratio behavior
-    // =========================================================================
-
-    /// @notice When primeBalance > matchingBalance, donateAmount equals matchingBalance
-    ///         and surplus prime stays in minter.
-    function test_dispatch_primeGreaterThanMatching_surplusPrimeStaysInMinter() public {
-        primeToken.mint(minter, 200e18);
-        matchingToken.mint(minter, 100e18);
-
-        vm.startPrank(minter);
-        primeToken.approve(address(pooler), type(uint256).max);
-        matchingToken.approve(address(pooler), type(uint256).max);
-        vm.stopPrank();
-
-        pooler.dispatch(minter, 10e18);
-
-        // donateAmount = min(200, 100) = 100
-        assertEq(primeToken.balanceOf(minter), 100e18, "Surplus prime should stay in minter");
-        assertEq(matchingToken.balanceOf(minter), 0, "All matching should be donated");
-        // Tokens end up in vault
-        assertEq(primeToken.balanceOf(address(mockVault)), 100e18, "100 prime donated to vault");
-        assertEq(matchingToken.balanceOf(address(mockVault)), 100e18, "100 matching donated to vault");
-
-        // Verify addLiquidity amounts
-        uint256[] memory amounts = mockVault.getLastParamsMaxAmountsIn();
-        assertEq(amounts[0], 100e18, "maxAmountsIn[0] should be donateAmount");
-        assertEq(amounts[1], 100e18, "maxAmountsIn[1] should be donateAmount");
-    }
-
-    /// @notice When matchingBalance > primeBalance, donateAmount equals primeBalance
-    ///         and surplus matching stays in minter.
-    function test_dispatch_matchingGreaterThanPrime_surplusMatchingStaysInMinter() public {
-        primeToken.mint(minter, 80e18);
-        matchingToken.mint(minter, 150e18);
-
-        vm.startPrank(minter);
-        primeToken.approve(address(pooler), type(uint256).max);
-        matchingToken.approve(address(pooler), type(uint256).max);
-        vm.stopPrank();
-
-        pooler.dispatch(minter, 10e18);
-
-        // donateAmount = min(80, 150) = 80
-        assertEq(primeToken.balanceOf(minter), 0, "All prime should be donated");
-        assertEq(matchingToken.balanceOf(minter), 70e18, "Surplus matching should stay in minter");
-        // Tokens end up in vault
-        assertEq(primeToken.balanceOf(address(mockVault)), 80e18, "80 prime donated to vault");
-        assertEq(matchingToken.balanceOf(address(mockVault)), 80e18, "80 matching donated to vault");
-    }
-
-    /// @notice When balances are equal, both fully donated with nothing remaining in minter.
-    function test_dispatch_equalBalances_bothFullyDonated() public {
-        primeToken.mint(minter, 100e18);
-        matchingToken.mint(minter, 100e18);
-
-        vm.startPrank(minter);
-        primeToken.approve(address(pooler), type(uint256).max);
-        matchingToken.approve(address(pooler), type(uint256).max);
-        vm.stopPrank();
-
-        pooler.dispatch(minter, 10e18);
-
-        // donateAmount = min(100, 100) = 100
-        assertEq(primeToken.balanceOf(minter), 0, "No prime should remain in minter");
-        assertEq(matchingToken.balanceOf(minter), 0, "No matching should remain in minter");
-        // Tokens end up in vault
-        assertEq(primeToken.balanceOf(address(mockVault)), 100e18, "100 prime donated to vault");
-        assertEq(matchingToken.balanceOf(address(mockVault)), 100e18, "100 matching donated to vault");
-    }
-
-    // =========================================================================
-    // dispatch tests - zero thresholds (always transfers)
-    // =========================================================================
-
-    function test_dispatch_zeroThresholds_alwaysTransfers() public {
-        // Default thresholds are 0, so any balance >= 0 triggers transfer
-        primeToken.mint(minter, 10e18);
-        matchingToken.mint(minter, 5e18);
-
-        vm.startPrank(minter);
-        primeToken.approve(address(pooler), type(uint256).max);
-        matchingToken.approve(address(pooler), type(uint256).max);
-        vm.stopPrank();
-
-        pooler.dispatch(minter, 10e18);
-
-        // 1:1 ratio: donateAmount = min(10, 5) = 5
-        assertEq(primeToken.balanceOf(minter), 5e18, "Surplus prime stays in minter");
-        assertEq(matchingToken.balanceOf(minter), 0, "All matching donated");
-        assertEq(primeToken.balanceOf(address(mockVault)), 5e18, "5 prime in vault");
-        assertEq(matchingToken.balanceOf(address(mockVault)), 5e18, "5 matching in vault");
     }
 
     // =========================================================================
     // unlockCallback tests
     // =========================================================================
 
-    /// @notice unlockCallback reverts if caller is not the vault.
     function test_unlockCallback_revertsIfCallerIsNotVault() public {
         vm.prank(nonOwner);
         vm.expectRevert("BalancerPooler: caller is not vault");
-        pooler.unlockCallback(abi.encode(uint256(100e18)));
+        pooler.unlockCallback(abi.encode(uint256(100e18), uint256(100e18)));
     }
 }

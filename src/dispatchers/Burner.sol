@@ -19,11 +19,6 @@ contract Burner is ATokenDispatcher {
     }
 
     /// @inheritdoc ITokenDispatcher
-    function tokensToApprove() external pure returns (address[] memory) {
-        return new address[](0);
-    }
-
-    /// @inheritdoc ITokenDispatcher
     function primeToken() external view returns (address) {
         return _token;
     }

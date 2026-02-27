@@ -40,15 +40,6 @@ contract BurnerTest is Test {
     }
 
     // =========================================================================
-    // tokensToApprove tests
-    // =========================================================================
-
-    function test_tokensToApprove_returnsEmptyArray() public view {
-        address[] memory tokens = burner.tokensToApprove();
-        assertEq(tokens.length, 0);
-    }
-
-    // =========================================================================
     // flavour tests
     // =========================================================================
 
