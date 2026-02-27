@@ -3,7 +3,6 @@ pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
 import {Burner} from "../src/dispatchers/Burner.sol";
-import {ITokenDispatcher} from "../src/interfaces/ITokenDispatcher.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 /// @dev Mock ERC20 with burn capability for testing expected burn behavior.

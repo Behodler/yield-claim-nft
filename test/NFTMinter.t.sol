@@ -1,14 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Test, console} from "forge-std/Test.sol";
+import {Test} from "forge-std/Test.sol";
 import {NFTMinter} from "../src/NFTMinter.sol";
 import {Accumulator} from "../src/dispatchers/Accumulator.sol";
 import {ATokenDispatcher} from "../src/dispatchers/ATokenDispatcher.sol";
 import {Burner} from "../src/dispatchers/Burner.sol";
-import {ITokenDispatcher} from "../src/interfaces/ITokenDispatcher.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 /// @dev Simple mock ERC20 for testing.

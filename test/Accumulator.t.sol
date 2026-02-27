@@ -3,7 +3,6 @@ pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
 import {Accumulator} from "../src/dispatchers/Accumulator.sol";
-import {ITokenDispatcher} from "../src/interfaces/ITokenDispatcher.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 /// @dev Simple mock ERC20 for testing.
