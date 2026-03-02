@@ -61,7 +61,7 @@ contract BalancerPooler is ATokenDispatcher, IUnlockCallback {
 
     /// @notice Dispatches tokens (already on this contract) to the Balancer pool via unlock pattern.
     /// @param amount The FOT-adjusted amount of prime token to donate.
-    function dispatch(address, uint256 amount) external override onlyMinter whenNotPaused {
+    function dispatch(address, uint256 amount, bytes calldata /* extraData */) external override onlyMinter whenNotPaused {
         bytes memory data = abi.encode(amount);
         IBalancerVault(_vault).unlock(data);
     }

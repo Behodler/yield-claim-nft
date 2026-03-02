@@ -9,6 +9,14 @@ interface ITokenMinter {
     /// @return success True if the mint was successful.
     function mint(address token, uint256 index, address recipient) external returns (bool);
 
+    /// @notice Mints a claim NFT, forwarding arbitrary extra data to the dispatcher.
+    /// @param token The ERC20 token address to pay with.
+    /// @param index The dispatcher index to route the payment to.
+    /// @param recipient The address that receives the claim NFT.
+    /// @param extraData Dispatcher-specific encoded data (e.g. slippage parameters).
+    /// @return success True if the mint was successful.
+    function mint(address token, uint256 index, address recipient, bytes calldata extraData) external returns (bool);
+
     /// @notice Registers a new token dispatcher. Only callable by owner.
     /// @param dispatcher The dispatcher contract address.
     /// @param initialPrice The initial mint price in the dispatcher's prime token units.

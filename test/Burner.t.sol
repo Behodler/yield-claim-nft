@@ -93,7 +93,7 @@ contract BurnerTest is Test {
 
         // Dispatch (called by minter)
         vm.prank(minter);
-        burner.dispatch(minter, amount);
+        burner.dispatch(minter, amount, "");
 
         // After dispatch, the tokens should be BURNED (total supply decreased)
         assertEq(token.totalSupply(), 0, "Tokens should be burned, reducing total supply to 0");
@@ -109,7 +109,7 @@ contract BurnerTest is Test {
         token.mint(address(burner), amount + 25e18);
 
         vm.prank(minter);
-        burner.dispatch(minter, amount);
+        burner.dispatch(minter, amount, "");
 
         // Only `amount` should be burned, 25e18 remains
         assertEq(token.balanceOf(address(burner)), 25e18, "Only dispatched amount should be burned");
@@ -124,7 +124,7 @@ contract BurnerTest is Test {
         // Non-minter cannot call dispatch
         vm.prank(address(0xDEAD));
         vm.expectRevert("ATokenDispatcher: caller is not minter");
-        burner.dispatch(address(0xDEAD), amount);
+        burner.dispatch(address(0xDEAD), amount, "");
     }
 
     // =========================================================================
@@ -143,7 +143,7 @@ contract BurnerTest is Test {
 
         // Should not revert
         vm.prank(minter);
-        fotBurner.dispatch(minter, amount);
+        fotBurner.dispatch(minter, amount, "");
 
         // burn: burner burns 100e18 (no transferFrom fee anymore, tokens already present)
         // Total supply should be 0
@@ -161,7 +161,7 @@ contract BurnerTest is Test {
         fotToken.mint(address(fotBurner), amount);
 
         vm.prank(minter);
-        fotBurner.dispatch(minter, amount);
+        fotBurner.dispatch(minter, amount, "");
 
         // Burner should have 0 balance (all burned)
         assertEq(fotToken.balanceOf(address(fotBurner)), 0, "Burner should have 0 balance after FOT dispatch");

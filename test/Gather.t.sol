@@ -69,7 +69,7 @@ contract GatherTest is Test {
 
         // Dispatch (called by minter)
         vm.prank(minter);
-        gather.dispatch(minter, amount);
+        gather.dispatch(minter, amount, "");
 
         // After dispatch, the recipient should have the tokens
         assertEq(token.balanceOf(recipientAddr), amount, "Recipient should have received the tokens");
@@ -85,7 +85,7 @@ contract GatherTest is Test {
         token.mint(address(gather), amount);
 
         vm.prank(minter);
-        gather.dispatch(minter, amount);
+        gather.dispatch(minter, amount, "");
 
         // Gather should have no tokens (they were forwarded)
         assertEq(token.balanceOf(address(gather)), 0, "Gather should have 0 balance");
@@ -105,7 +105,7 @@ contract GatherTest is Test {
 
         vm.prank(minter);
         vm.expectRevert(Pausable.EnforcedPause.selector);
-        gather.dispatch(minter, amount);
+        gather.dispatch(minter, amount, "");
     }
 
     /// @notice Verifies that dispatch reverts when called by non-minter.
@@ -117,7 +117,7 @@ contract GatherTest is Test {
         // Non-minter cannot call dispatch
         vm.prank(address(0xDEAD));
         vm.expectRevert("ATokenDispatcher: caller is not minter");
-        gather.dispatch(address(0xDEAD), amount);
+        gather.dispatch(address(0xDEAD), amount, "");
     }
 
     // =========================================================================
@@ -221,7 +221,7 @@ contract GatherTest is Test {
 
         // Should not revert
         vm.prank(minter);
-        fotGather.dispatch(minter, amount);
+        fotGather.dispatch(minter, amount, "");
 
         // transfer: Gather -> recipient, 2% fee on 100e18 = 2e18 burned, recipient receives 98e18
         // Only ONE fee deduction (gather -> recipient), not double fee like before
@@ -241,7 +241,7 @@ contract GatherTest is Test {
         fotToken.mint(address(fotGather), amount);
 
         vm.prank(minter);
-        fotGather.dispatch(minter, amount);
+        fotGather.dispatch(minter, amount, "");
 
         // Gather should have 0 balance (all forwarded to recipient)
         assertEq(fotToken.balanceOf(address(fotGather)), 0, "Gather should have 0 balance after FOT dispatch");

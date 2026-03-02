@@ -603,11 +603,11 @@ contract NFTMinterTest is Test {
         // Non-minter (random user) should not be able to call dispatch
         vm.prank(user);
         vm.expectRevert("ATokenDispatcher: caller is not minter");
-        gather.dispatch(user, 10e18);
+        gather.dispatch(user, 10e18, "");
 
         // Owner (this test contract, not the minter) also cannot call dispatch
         vm.expectRevert("ATokenDispatcher: caller is not minter");
-        gather.dispatch(address(this), 10e18);
+        gather.dispatch(address(this), 10e18, "");
     }
 
     function test_ATokenDispatcher_minterCanPauseAndUnpause() public {
@@ -875,5 +875,61 @@ contract NFTMinterTest is Test {
         // Price growth should still be based on original price (unchanged)
         // Since growth is 0, price stays the same
         assertEq(minter.getPrice(1), price, "Price should remain unchanged with 0 growth");
+    }
+
+    // =========================================================================
+    // 4-parameter mint() overload with extraData
+    // =========================================================================
+
+    function test_mint_withExtraData_transfersTokenAndMintsNFT() public {
+        // Setup: register gather dispatcher and authorize minter
+        uint256 price = 10e18;
+        minter.registerDispatcher(address(gather), price, 0);
+        gather.setMinter(address(minter));
+
+        // Give user tokens and approve minter
+        tokenA.mint(user, 100e18);
+        vm.prank(user);
+        tokenA.approve(address(minter), type(uint256).max);
+
+        // Mint using 4-parameter overload with non-empty extraData
+        bytes memory extraData = abi.encode(uint256(42), uint256(100));
+        vm.prank(user);
+        bool success = minter.mint(address(tokenA), 1, recipient, extraData);
+
+        assertTrue(success, "4-parameter mint should succeed");
+        // User paid price
+        assertEq(tokenA.balanceOf(user), 90e18, "User should have paid 10e18");
+        // Minter should have 0 balance (tokens went directly to dispatcher)
+        assertEq(tokenA.balanceOf(address(minter)), 0, "Minter should have 0 balance");
+        // Gather forwarded tokens to its recipient
+        assertEq(tokenA.balanceOf(gatherRecipient), 10e18, "Gather recipient should have received tokens");
+        // Recipient got 1 claim NFT
+        assertEq(minter.balanceOf(recipient, minter.CLAIM_TOKEN_ID()), 1, "Recipient should have 1 claim NFT");
+    }
+
+    function test_mint_withEmptyExtraData_matchesBehaviorOf3ParamMint() public {
+        // Setup: register gather dispatcher and authorize minter
+        uint256 price = 10e18;
+        minter.registerDispatcher(address(gather), price, 0);
+        gather.setMinter(address(minter));
+
+        // Give user tokens and approve minter
+        tokenA.mint(user, 200e18);
+        vm.prank(user);
+        tokenA.approve(address(minter), type(uint256).max);
+
+        // First mint via 3-parameter overload
+        vm.prank(user);
+        minter.mint(address(tokenA), 1, recipient);
+        assertEq(minter.balanceOf(recipient, minter.CLAIM_TOKEN_ID()), 1, "First mint should produce 1 NFT");
+
+        // Second mint via 4-parameter overload with empty bytes
+        vm.prank(user);
+        minter.mint(address(tokenA), 1, recipient, "");
+        assertEq(minter.balanceOf(recipient, minter.CLAIM_TOKEN_ID()), 2, "Second mint should produce 2 total NFTs");
+
+        // Both mints should have forwarded tokens to gather recipient
+        assertEq(tokenA.balanceOf(gatherRecipient), 20e18, "Gather recipient should have received tokens from both mints");
     }
 }

@@ -191,7 +191,7 @@ contract BalancerPoolerTest is Test {
         primeToken.mint(address(pooler), amount);
 
         vm.prank(minter);
-        pooler.dispatch(minter, amount);
+        pooler.dispatch(minter, amount, "");
 
         // Verify addLiquidity was called (donation happened)
         assertTrue(mockVault.addLiquidityCalled(), "addLiquidity should have been called even for small amounts");
@@ -205,7 +205,7 @@ contract BalancerPoolerTest is Test {
         // Non-minter cannot call dispatch
         vm.prank(nonOwner);
         vm.expectRevert("ATokenDispatcher: caller is not minter");
-        pooler.dispatch(nonOwner, amount);
+        pooler.dispatch(nonOwner, amount, "");
     }
 
     // =========================================================================
@@ -221,7 +221,7 @@ contract BalancerPoolerTest is Test {
         assertEq(phUSDToken.totalSupply(), 0);
 
         vm.prank(minter);
-        pooler.dispatch(minter, amount);
+        pooler.dispatch(minter, amount, "");
 
         // phUSD was minted to pooler then transferred to vault during settlement
         // So vault should hold the phUSD now
@@ -239,7 +239,7 @@ contract BalancerPoolerTest is Test {
         primeToken.mint(address(pooler), amount);
 
         vm.prank(minter);
-        pooler.dispatch(minter, amount);
+        pooler.dispatch(minter, amount, "");
 
         // With same decimals, phUSD amount should equal prime amount
         uint256[] memory amounts = mockVault.getLastParamsMaxAmountsIn();
@@ -274,7 +274,7 @@ contract BalancerPoolerTest is Test {
         primeToken6.mint(address(pooler6), amount);
 
         vm.prank(minter);
-        pooler6.dispatch(minter, amount);
+        pooler6.dispatch(minter, amount, "");
 
         uint256[] memory amounts = vault2.getLastParamsMaxAmountsIn();
         // primeTokenIsFirst = true
@@ -308,7 +308,7 @@ contract BalancerPoolerTest is Test {
         primeToken6.mint(address(pooler6), primeAmount);
 
         vm.prank(minter);
-        pooler6.dispatch(minter, primeAmount);
+        pooler6.dispatch(minter, primeAmount, "");
 
         // Check that vault received correct amounts in their respective decimals
         assertEq(primeToken6.balanceOf(address(vault2)), 50e6, "Prime token donated in prime decimals (6)");
@@ -326,7 +326,7 @@ contract BalancerPoolerTest is Test {
         primeToken.mint(address(pooler), amount);
 
         vm.prank(minter);
-        pooler.dispatch(minter, amount);
+        pooler.dispatch(minter, amount, "");
 
         uint256[] memory amounts = mockVault.getLastParamsMaxAmountsIn();
         assertEq(amounts[0], amount, "maxAmountsIn[0] should be primeAmount when primeTokenIsFirst=true");
@@ -351,7 +351,7 @@ contract BalancerPoolerTest is Test {
         primeToken.mint(address(poolerReversed), amount);
 
         vm.prank(minter);
-        poolerReversed.dispatch(minter, amount);
+        poolerReversed.dispatch(minter, amount, "");
 
         uint256[] memory amounts = mockVault.getLastParamsMaxAmountsIn();
         assertEq(amounts[0], amount, "maxAmountsIn[0] should be phUSDAmount when primeTokenIsFirst=false");
@@ -368,7 +368,7 @@ contract BalancerPoolerTest is Test {
         primeToken.mint(address(pooler), amount);
 
         vm.prank(minter);
-        pooler.dispatch(minter, amount);
+        pooler.dispatch(minter, amount, "");
 
         // Verify addLiquidity was called
         assertTrue(mockVault.addLiquidityCalled(), "addLiquidity should have been called");
@@ -407,7 +407,7 @@ contract BalancerPoolerTest is Test {
         primeToken.mint(address(pooler), amount);
 
         vm.prank(minter);
-        pooler.dispatch(minter, amount);
+        pooler.dispatch(minter, amount, "");
 
         // Both settlements should match actual amounts
         uint256 settlementsCount = mockVault.getSettlementsCount();
@@ -453,7 +453,7 @@ contract BalancerPoolerTest is Test {
 
         // Should not revert
         vm.prank(minter);
-        fotPooler.dispatch(minter, amount);
+        fotPooler.dispatch(minter, amount, "");
 
         // phUSD should have been minted (in callback)
         assertTrue(phUSDToken.totalSupply() > 0, "phUSD should have been minted in callback");
@@ -483,7 +483,7 @@ contract BalancerPoolerTest is Test {
         fotToken.mint(address(fotPooler), amount);
 
         vm.prank(minter);
-        fotPooler.dispatch(minter, amount);
+        fotPooler.dispatch(minter, amount, "");
 
         // Only ONE FOT fee now: pooler -> vault transfer (2% fee on 100e18)
         // actualPrimeInVault = 100e18 - (100e18 * 200 / 10000) = 100e18 - 2e18 = 98e18
@@ -525,7 +525,7 @@ contract BalancerPoolerTest is Test {
         fotToken.mint(address(fotPooler), amount);
 
         vm.prank(minter);
-        fotPooler.dispatch(minter, amount);
+        fotPooler.dispatch(minter, amount, "");
 
         // No tokens should be stuck in the pooler
         assertEq(fotToken.balanceOf(address(fotPooler)), 0, "No FOT tokens should be stuck in pooler");
@@ -539,7 +539,7 @@ contract BalancerPoolerTest is Test {
         primeToken.mint(address(pooler), amount);
 
         vm.prank(minter);
-        pooler.dispatch(minter, amount);
+        pooler.dispatch(minter, amount, "");
 
         // Verify standard behavior
         assertTrue(mockVault.addLiquidityCalled(), "addLiquidity should have been called");

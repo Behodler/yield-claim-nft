@@ -114,6 +114,19 @@ contract NFTMinter is ERC1155, Ownable, ITokenMinter, IPausable {
 
     /// @inheritdoc ITokenMinter
     function mint(address token, uint256 index, address recipient) external returns (bool) {
+        return _executeMint(token, index, recipient, "");
+    }
+
+    /// @inheritdoc ITokenMinter
+    function mint(address token, uint256 index, address recipient, bytes calldata extraData) external returns (bool) {
+        return _executeMint(token, index, recipient, extraData);
+    }
+
+    /// @dev Shared internal implementation for both mint() overloads.
+    function _executeMint(address token, uint256 index, address recipient, bytes memory extraData)
+        internal
+        returns (bool)
+    {
         require(!paused, "Contract is paused");
         DispatcherConfig storage config = configs[index];
         require(config.dispatcher != address(0), "NFTMinter: index not registered");
@@ -134,7 +147,7 @@ contract NFTMinter is ERC1155, Ownable, ITokenMinter, IPausable {
         config.price = price + (price * config.growthBasisPoints) / 10000;
 
         // Invoke the dispatcher with actual received amount (dispatch is on ATokenDispatcher with whenNotPaused guard)
-        ATokenDispatcher(config.dispatcher).dispatch(address(this), actualReceived);
+        ATokenDispatcher(config.dispatcher).dispatch(address(this), actualReceived, extraData);
 
         // Mint 1 claim NFT to recipient
         _mint(recipient, CLAIM_TOKEN_ID, 1, "");

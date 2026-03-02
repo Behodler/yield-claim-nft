@@ -29,7 +29,7 @@ contract Burner is ATokenDispatcher {
 
     /// @notice Burns tokens already on this contract.
     /// @param amount The FOT-adjusted amount of prime token to burn.
-    function dispatch(address, uint256 amount) external override onlyMinter whenNotPaused {
+    function dispatch(address, uint256 amount, bytes calldata /* extraData */) external override onlyMinter whenNotPaused {
         IBurnable(_token).burn(amount);
     }
 }
