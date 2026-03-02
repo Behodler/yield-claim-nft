@@ -129,11 +129,12 @@ contract NFTMinter is ERC1155, Ownable, ITokenMinter, IPausable {
         IERC20(token).transferFrom(msg.sender, config.dispatcher, price);
         uint256 actualReceived = IERC20(token).balanceOf(config.dispatcher) - balanceBefore;
 
+        // Grow price: newPrice = oldPrice + (oldPrice * growthBasisPoints / 10000)
+        // Updated before dispatch to follow checks-effects-interactions pattern
+        config.price = price + (price * config.growthBasisPoints) / 10000;
+
         // Invoke the dispatcher with actual received amount (dispatch is on ATokenDispatcher with whenNotPaused guard)
         ATokenDispatcher(config.dispatcher).dispatch(address(this), actualReceived);
-
-        // Grow price: newPrice = oldPrice + (oldPrice * growthBasisPoints / 10000)
-        config.price = price + (price * config.growthBasisPoints) / 10000;
 
         // Mint 1 claim NFT to recipient
         _mint(recipient, CLAIM_TOKEN_ID, 1, "");
