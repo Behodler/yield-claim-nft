@@ -594,6 +594,22 @@ contract NFTMinterTest is Test {
         gather.unpause();
     }
 
+    function test_ATokenDispatcher_dispatch_restrictedToMinter() public {
+        gather.setMinter(address(minter));
+
+        // Give the dispatcher some tokens so dispatch has something to work with
+        tokenA.mint(address(gather), 10e18);
+
+        // Non-minter (random user) should not be able to call dispatch
+        vm.prank(user);
+        vm.expectRevert("ATokenDispatcher: caller is not minter");
+        gather.dispatch(user, 10e18);
+
+        // Owner (this test contract, not the minter) also cannot call dispatch
+        vm.expectRevert("ATokenDispatcher: caller is not minter");
+        gather.dispatch(address(this), 10e18);
+    }
+
     function test_ATokenDispatcher_minterCanPauseAndUnpause() public {
         gather.setMinter(address(minter));
 

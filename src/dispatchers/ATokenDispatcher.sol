@@ -41,5 +41,5 @@ abstract contract ATokenDispatcher is ITokenDispatcher, Pausable, Ownable {
     /// @notice Executes the dispatch logic. Reverts if the dispatcher is paused.
     /// @param minter The NFTMinter contract address.
     /// @param amount The amount of prime token that was paid for this mint.
-    function dispatch(address minter, uint256 amount) external virtual whenNotPaused {}
+    function dispatch(address minter, uint256 amount) external virtual onlyMinter whenNotPaused {}
 }
