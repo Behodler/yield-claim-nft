@@ -102,9 +102,6 @@ contract NFTMinter is ERC1155, Ownable, ITokenMinter, IPausable {
         // Read prime token from dispatcher
         address token = ITokenDispatcher(dispatcher).primeToken();
 
-        // Approve the prime token for the dispatcher (so dispatcher can pull it from minter)
-        IERC20(token).approve(dispatcher, type(uint256).max);
-
         // Store configuration
         configs[index] = DispatcherConfig({dispatcher: dispatcher, price: initialPrice, growthBasisPoints: growthBasisPoints});
 
@@ -127,10 +124,10 @@ contract NFTMinter is ERC1155, Ownable, ITokenMinter, IPausable {
 
         uint256 price = config.price;
 
-        // Pull tokens from the user to this contract (balance-before/after for FOT safety)
-        uint256 balanceBefore = IERC20(token).balanceOf(address(this));
-        IERC20(token).transferFrom(msg.sender, address(this), price);
-        uint256 actualReceived = IERC20(token).balanceOf(address(this)) - balanceBefore;
+        // Transfer tokens directly from user to dispatcher (balance-before/after for FOT safety)
+        uint256 balanceBefore = IERC20(token).balanceOf(config.dispatcher);
+        IERC20(token).transferFrom(msg.sender, config.dispatcher, price);
+        uint256 actualReceived = IERC20(token).balanceOf(config.dispatcher) - balanceBefore;
 
         // Invoke the dispatcher with actual received amount (dispatch is on ATokenDispatcher with whenNotPaused guard)
         ATokenDispatcher(config.dispatcher).dispatch(address(this), actualReceived);

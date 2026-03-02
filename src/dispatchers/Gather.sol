@@ -7,7 +7,7 @@ import {ITokenDispatcher} from "../interfaces/ITokenDispatcher.sol";
 
 /// @title Gather
 /// @notice A token dispatcher that forwards received tokens to a configurable recipient address.
-/// @dev Pulls prime tokens from the minter and transfers them to the recipient.
+/// @dev Tokens arrive directly on this contract via the minter's transferFrom.
 ///      The recipient address is updatable by the owner.
 contract Gather is ATokenDispatcher {
     address private immutable _token;
@@ -54,16 +54,9 @@ contract Gather is ATokenDispatcher {
         emit RecipientUpdated(oldRecipient, newRecipient);
     }
 
-    /// @notice Pulls prime tokens from the minter and transfers them to the recipient.
-    /// @param minter The NFTMinter contract address.
-    /// @param amount The amount of prime token to gather.
-    function dispatch(address minter, uint256 amount) external override whenNotPaused {
-        // Pull the prime token from the minter (balance-before/after for FOT safety)
-        uint256 balanceBefore = IERC20(_token).balanceOf(address(this));
-        IERC20(_token).transferFrom(minter, address(this), amount);
-        uint256 actualReceived = IERC20(_token).balanceOf(address(this)) - balanceBefore;
-
-        // Forward actual received amount to the recipient
-        IERC20(_token).transfer(_recipient, actualReceived);
+    /// @notice Forwards tokens (already on this contract) to the recipient.
+    /// @param amount The FOT-adjusted amount of prime token to forward.
+    function dispatch(address, uint256 amount) external override onlyMinter whenNotPaused {
+        IERC20(_token).transfer(_recipient, amount);
     }
 }

@@ -28,6 +28,8 @@ contract GatherTest is Test {
     function setUp() public {
         token = new MockERC20("Gather Token", "GTH");
         gather = new Gather(address(token), recipientAddr, "Gather GTH", owner);
+        // Set the minter so dispatch() can be called via onlyMinter
+        gather.setMinter(minter);
     }
 
     // =========================================================================
@@ -55,21 +57,18 @@ contract GatherTest is Test {
     }
 
     // =========================================================================
-    // dispatch tests
+    // dispatch tests (tokens already on gather, just forward to recipient)
     // =========================================================================
 
     /// @notice Verifies that dispatch transfers tokens to the recipient.
     function test_dispatch_transfersTokenToRecipient() public {
         uint256 amount = 100e18;
 
-        // Mint tokens to the minter address
-        token.mint(minter, amount);
+        // Tokens are already on gather (sent by minter's transferFrom)
+        token.mint(address(gather), amount);
 
-        // Approve gather to pull from minter
+        // Dispatch (called by minter)
         vm.prank(minter);
-        token.approve(address(gather), type(uint256).max);
-
-        // Dispatch
         gather.dispatch(minter, amount);
 
         // After dispatch, the recipient should have the tokens
@@ -78,38 +77,47 @@ contract GatherTest is Test {
         assertEq(token.balanceOf(address(gather)), 0, "Gather should have 0 balance after forwarding");
     }
 
-    /// @notice Verifies that dispatch pulls tokens from the minter.
-    function test_dispatch_pullsTokensFromMinter() public {
+    /// @notice Verifies that dispatch forwards all tokens from gather to recipient.
+    function test_dispatch_forwardsTokensToRecipient() public {
         uint256 amount = 50e18;
 
-        token.mint(minter, amount);
+        // Tokens already on gather
+        token.mint(address(gather), amount);
 
         vm.prank(minter);
-        token.approve(address(gather), type(uint256).max);
-
         gather.dispatch(minter, amount);
 
-        // Minter should have no tokens left (they were pulled)
-        assertEq(token.balanceOf(minter), 0, "Minter should have 0 balance after dispatch");
         // Gather should have no tokens (they were forwarded)
         assertEq(token.balanceOf(address(gather)), 0, "Gather should have 0 balance");
+        // Recipient should have the tokens
+        assertEq(token.balanceOf(recipientAddr), amount, "Recipient should have received tokens");
     }
 
     /// @notice Verifies that dispatch reverts when the dispatcher is paused.
     function test_dispatch_revertsWhenPaused() public {
         uint256 amount = 100e18;
 
-        token.mint(minter, amount);
+        token.mint(address(gather), amount);
 
+        // Pause the dispatcher
         vm.prank(minter);
-        token.approve(address(gather), type(uint256).max);
-
-        // Set the minter on the dispatcher so it can be paused
-        gather.setMinter(address(this));
         gather.pause();
 
+        vm.prank(minter);
         vm.expectRevert(Pausable.EnforcedPause.selector);
         gather.dispatch(minter, amount);
+    }
+
+    /// @notice Verifies that dispatch reverts when called by non-minter.
+    function test_dispatch_revertsWhenCalledByNonMinter() public {
+        uint256 amount = 100e18;
+
+        token.mint(address(gather), amount);
+
+        // Non-minter cannot call dispatch
+        vm.prank(address(0xDEAD));
+        vm.expectRevert("ATokenDispatcher: caller is not minter");
+        gather.dispatch(address(0xDEAD), amount);
     }
 
     // =========================================================================
@@ -168,7 +176,7 @@ contract GatherTest is Test {
         uint256 initialPrice = 10e18;
         nftMinter.registerDispatcher(address(gather), initialPrice, 0);
 
-        // Authorize NFTMinter as the minter on Gather (so it can pause/unpause)
+        // Authorize NFTMinter as the minter on Gather (so it can pause/unpause and call dispatch)
         gather.setMinter(address(nftMinter));
 
         // Setup user with tokens
@@ -198,41 +206,41 @@ contract GatherTest is Test {
     }
 
     // =========================================================================
-    // FOT token dispatch tests
+    // FOT token dispatch tests (only one fee: gather -> recipient)
     // =========================================================================
 
-    function test_dispatch_FOTToken_noRevert_recipientGetsTokensAfterDoubleFee() public {
+    function test_dispatch_FOTToken_noRevert_recipientGetsTokensAfterSingleFee() public {
         // Create a FOT token with 2% fee (200 bps)
         MockFOTToken fotToken = new MockFOTToken("FOT Token", "FOT", 200);
         Gather fotGather = new Gather(address(fotToken), recipientAddr, "Gather FOT", owner);
+        fotGather.setMinter(minter);
 
         uint256 amount = 100e18;
-        fotToken.mint(minter, amount);
-
-        vm.prank(minter);
-        fotToken.approve(address(fotGather), type(uint256).max);
+        // Tokens already on gather (simulating direct transfer from minter)
+        fotToken.mint(address(fotGather), amount);
 
         // Should not revert
+        vm.prank(minter);
         fotGather.dispatch(minter, amount);
 
-        // transferFrom: minter -> Gather, 2% fee = 2e18 burned, Gather receives 98e18
-        // transfer: Gather -> recipient, 2% fee on 98e18 = 1.96e18 burned, recipient receives 96.04e18
-        uint256 expectedRecipientBalance = 9604e16; // 96.04e18
+        // transfer: Gather -> recipient, 2% fee on 100e18 = 2e18 burned, recipient receives 98e18
+        // Only ONE fee deduction (gather -> recipient), not double fee like before
+        uint256 expectedRecipientBalance = 98e18;
 
-        assertEq(fotToken.balanceOf(recipientAddr), expectedRecipientBalance, "Recipient should receive tokens after double FOT fee");
+        assertEq(fotToken.balanceOf(recipientAddr), expectedRecipientBalance, "Recipient should receive tokens after single FOT fee");
     }
 
     function test_dispatch_FOTToken_zeroTokensStuckInGather() public {
         // Create a FOT token with 3% fee (300 bps)
         MockFOTToken fotToken = new MockFOTToken("FOT Token", "FOT", 300);
         Gather fotGather = new Gather(address(fotToken), recipientAddr, "Gather FOT", owner);
+        fotGather.setMinter(minter);
 
         uint256 amount = 100e18;
-        fotToken.mint(minter, amount);
+        // Tokens already on gather
+        fotToken.mint(address(fotGather), amount);
 
         vm.prank(minter);
-        fotToken.approve(address(fotGather), type(uint256).max);
-
         fotGather.dispatch(minter, amount);
 
         // Gather should have 0 balance (all forwarded to recipient)

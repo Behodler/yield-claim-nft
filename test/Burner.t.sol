@@ -60,6 +60,8 @@ contract BurnerTest is Test {
     function setUp() public {
         token = new MockBurnableERC20("Burn Token", "BURN");
         burner = new Burner(address(token), "Burn BURN", owner);
+        // Set the minter so dispatch() can be called via onlyMinter
+        burner.setMinter(minter);
     }
 
     // =========================================================================
@@ -79,21 +81,18 @@ contract BurnerTest is Test {
     }
 
     // =========================================================================
-    // dispatch tests
+    // dispatch tests (tokens already on burner, just burn them)
     // =========================================================================
 
-    /// @notice Verifies that dispatch pulls tokens from the minter and burns them.
+    /// @notice Verifies that dispatch burns tokens already on the burner.
     function test_dispatch_burnsToken() public {
         uint256 amount = 100e18;
 
-        // Mint tokens to the minter address
-        token.mint(minter, amount);
+        // Tokens are already on burner (sent by minter's transferFrom)
+        token.mint(address(burner), amount);
 
-        // Approve burner to pull from minter
+        // Dispatch (called by minter)
         vm.prank(minter);
-        token.approve(address(burner), type(uint256).max);
-
-        // Dispatch
         burner.dispatch(minter, amount);
 
         // After dispatch, the tokens should be BURNED (total supply decreased)
@@ -102,58 +101,66 @@ contract BurnerTest is Test {
         assertEq(token.balanceOf(address(burner)), 0, "Burner should have 0 balance after burning");
     }
 
-    /// @notice Verifies that dispatch pulls tokens from the minter and burns them.
-    function test_dispatch_pullsTokensFromMinter() public {
+    /// @notice Verifies that dispatch burns the correct amount.
+    function test_dispatch_burnsCorrectAmount() public {
         uint256 amount = 50e18;
 
-        token.mint(minter, amount);
+        // Mint extra tokens to burner to verify only `amount` is burned
+        token.mint(address(burner), amount + 25e18);
 
         vm.prank(minter);
-        token.approve(address(burner), type(uint256).max);
-
         burner.dispatch(minter, amount);
 
-        // Minter should have no tokens left (they were pulled)
-        assertEq(token.balanceOf(minter), 0);
-        // Burner should have no tokens (they were burned)
-        assertEq(token.balanceOf(address(burner)), 0);
+        // Only `amount` should be burned, 25e18 remains
+        assertEq(token.balanceOf(address(burner)), 25e18, "Only dispatched amount should be burned");
+    }
+
+    /// @notice Verifies that dispatch reverts when called by non-minter.
+    function test_dispatch_revertsWhenCalledByNonMinter() public {
+        uint256 amount = 100e18;
+
+        token.mint(address(burner), amount);
+
+        // Non-minter cannot call dispatch
+        vm.prank(address(0xDEAD));
+        vm.expectRevert("ATokenDispatcher: caller is not minter");
+        burner.dispatch(address(0xDEAD), amount);
     }
 
     // =========================================================================
-    // FOT token dispatch tests
+    // FOT token dispatch tests (tokens already on burner)
     // =========================================================================
 
     function test_dispatch_FOTToken_noRevert_tokensBurned() public {
         // Create a burnable FOT token with 2% fee (200 bps)
         MockBurnableFOTToken fotToken = new MockBurnableFOTToken("FOT Burn Token", "FOTBURN", 200);
         Burner fotBurner = new Burner(address(fotToken), "Burn FOTBURN", owner);
+        fotBurner.setMinter(minter);
 
         uint256 amount = 100e18;
-        fotToken.mint(minter, amount);
-
-        vm.prank(minter);
-        fotToken.approve(address(fotBurner), type(uint256).max);
+        // Tokens already on burner (sent by minter's transferFrom)
+        fotToken.mint(address(fotBurner), amount);
 
         // Should not revert
+        vm.prank(minter);
         fotBurner.dispatch(minter, amount);
 
-        // transferFrom: minter -> burner, 2% fee = 2e18 burned in transfer, burner receives 98e18
-        // burn: burner burns 98e18
-        // Total supply should be 0 (100e18 minted - 2e18 FOT fee burned - 98e18 explicitly burned)
-        assertEq(fotToken.totalSupply(), 0, "All tokens should be burned after FOT dispatch");
+        // burn: burner burns 100e18 (no transferFrom fee anymore, tokens already present)
+        // Total supply should be 0
+        assertEq(fotToken.totalSupply(), 0, "All tokens should be burned after dispatch");
     }
 
     function test_dispatch_FOTToken_zeroTokensStuckInBurner() public {
         // Create a burnable FOT token with 3% fee (300 bps)
         MockBurnableFOTToken fotToken = new MockBurnableFOTToken("FOT Burn Token", "FOTBURN", 300);
         Burner fotBurner = new Burner(address(fotToken), "Burn FOTBURN", owner);
+        fotBurner.setMinter(minter);
 
         uint256 amount = 100e18;
-        fotToken.mint(minter, amount);
+        // Tokens already on burner
+        fotToken.mint(address(fotBurner), amount);
 
         vm.prank(minter);
-        fotToken.approve(address(fotBurner), type(uint256).max);
-
         fotBurner.dispatch(minter, amount);
 
         // Burner should have 0 balance (all burned)

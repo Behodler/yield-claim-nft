@@ -145,6 +145,8 @@ contract BalancerPoolerTest is Test {
             "Pool PRM/phUSD",
             owner
         );
+        // Set the minter so dispatch() can be called via onlyMinter
+        pooler.setMinter(minter);
     }
 
     // =========================================================================
@@ -180,20 +182,30 @@ contract BalancerPoolerTest is Test {
     }
 
     // =========================================================================
-    // dispatch tests - always donates (no threshold gating)
+    // dispatch tests - tokens already on pooler, donates always
     // =========================================================================
 
     function test_dispatch_alwaysDonates_noThresholdGating() public {
         uint256 amount = 1e18;
-        primeToken.mint(minter, amount);
+        // Tokens already on pooler (sent by minter's transferFrom)
+        primeToken.mint(address(pooler), amount);
 
         vm.prank(minter);
-        primeToken.approve(address(pooler), type(uint256).max);
-
         pooler.dispatch(minter, amount);
 
         // Verify addLiquidity was called (donation happened)
         assertTrue(mockVault.addLiquidityCalled(), "addLiquidity should have been called even for small amounts");
+    }
+
+    /// @notice Verifies that dispatch reverts when called by non-minter.
+    function test_dispatch_revertsWhenCalledByNonMinter() public {
+        uint256 amount = 100e18;
+        primeToken.mint(address(pooler), amount);
+
+        // Non-minter cannot call dispatch
+        vm.prank(nonOwner);
+        vm.expectRevert("ATokenDispatcher: caller is not minter");
+        pooler.dispatch(nonOwner, amount);
     }
 
     // =========================================================================
@@ -202,14 +214,13 @@ contract BalancerPoolerTest is Test {
 
     function test_dispatch_mintsPhUSD() public {
         uint256 amount = 100e18;
-        primeToken.mint(minter, amount);
-
-        vm.prank(minter);
-        primeToken.approve(address(pooler), type(uint256).max);
+        // Tokens already on pooler
+        primeToken.mint(address(pooler), amount);
 
         // Before dispatch, phUSD totalSupply is 0
         assertEq(phUSDToken.totalSupply(), 0);
 
+        vm.prank(minter);
         pooler.dispatch(minter, amount);
 
         // phUSD was minted to pooler then transferred to vault during settlement
@@ -224,11 +235,10 @@ contract BalancerPoolerTest is Test {
     function test_dispatch_sameDecimals_equalRawAmounts() public {
         // Both tokens are 18 decimals (setUp default)
         uint256 amount = 50e18;
-        primeToken.mint(minter, amount);
+        // Tokens already on pooler
+        primeToken.mint(address(pooler), amount);
 
         vm.prank(minter);
-        primeToken.approve(address(pooler), type(uint256).max);
-
         pooler.dispatch(minter, amount);
 
         // With same decimals, phUSD amount should equal prime amount
@@ -257,13 +267,13 @@ contract BalancerPoolerTest is Test {
             "Pool USDC/phUSD",
             owner
         );
+        pooler6.setMinter(minter);
 
         uint256 amount = 100e6; // 100 USDC (6 decimals)
-        primeToken6.mint(minter, amount);
+        // Tokens already on pooler
+        primeToken6.mint(address(pooler6), amount);
 
         vm.prank(minter);
-        primeToken6.approve(address(pooler6), type(uint256).max);
-
         pooler6.dispatch(minter, amount);
 
         uint256[] memory amounts = vault2.getLastParamsMaxAmountsIn();
@@ -291,13 +301,13 @@ contract BalancerPoolerTest is Test {
             "Pool USDC/phUSD",
             owner
         );
+        pooler6.setMinter(minter);
 
         uint256 primeAmount = 50e6; // 50 USDC
-        primeToken6.mint(minter, primeAmount);
+        // Tokens already on pooler
+        primeToken6.mint(address(pooler6), primeAmount);
 
         vm.prank(minter);
-        primeToken6.approve(address(pooler6), type(uint256).max);
-
         pooler6.dispatch(minter, primeAmount);
 
         // Check that vault received correct amounts in their respective decimals
@@ -312,11 +322,10 @@ contract BalancerPoolerTest is Test {
     function test_dispatch_primeTokenIsFirst_correctOrdering() public {
         // Default setUp has primeTokenIsFirst = true
         uint256 amount = 75e18;
-        primeToken.mint(minter, amount);
+        // Tokens already on pooler
+        primeToken.mint(address(pooler), amount);
 
         vm.prank(minter);
-        primeToken.approve(address(pooler), type(uint256).max);
-
         pooler.dispatch(minter, amount);
 
         uint256[] memory amounts = mockVault.getLastParamsMaxAmountsIn();
@@ -335,13 +344,13 @@ contract BalancerPoolerTest is Test {
             "Pool phUSD/PRM",
             owner
         );
+        poolerReversed.setMinter(minter);
 
         uint256 amount = 60e18;
-        primeToken.mint(minter, amount);
+        // Tokens already on pooler
+        primeToken.mint(address(poolerReversed), amount);
 
         vm.prank(minter);
-        primeToken.approve(address(poolerReversed), type(uint256).max);
-
         poolerReversed.dispatch(minter, amount);
 
         uint256[] memory amounts = mockVault.getLastParamsMaxAmountsIn();
@@ -355,11 +364,10 @@ contract BalancerPoolerTest is Test {
 
     function test_dispatch_donatesViaVault() public {
         uint256 amount = 100e18;
-        primeToken.mint(minter, amount);
+        // Tokens already on pooler
+        primeToken.mint(address(pooler), amount);
 
         vm.prank(minter);
-        primeToken.approve(address(pooler), type(uint256).max);
-
         pooler.dispatch(minter, amount);
 
         // Verify addLiquidity was called
@@ -395,11 +403,10 @@ contract BalancerPoolerTest is Test {
 
     function test_dispatch_settlementAmountsMatchVaultReceipts() public {
         uint256 amount = 100e18;
-        primeToken.mint(minter, amount);
+        // Tokens already on pooler
+        primeToken.mint(address(pooler), amount);
 
         vm.prank(minter);
-        primeToken.approve(address(pooler), type(uint256).max);
-
         pooler.dispatch(minter, amount);
 
         // Both settlements should match actual amounts
@@ -418,7 +425,7 @@ contract BalancerPoolerTest is Test {
     }
 
     // =========================================================================
-    // FOT token dispatch tests
+    // FOT token dispatch tests (tokens already on pooler, only callback transfer has FOT fee)
     // =========================================================================
 
     function test_dispatch_FOTToken_noRevert_phUSDMintedInCallback() public {
@@ -435,17 +442,17 @@ contract BalancerPoolerTest is Test {
             "Pool FOT/phUSD",
             owner
         );
+        fotPooler.setMinter(minter);
 
         uint256 amount = 100e18;
-        fotToken.mint(minter, amount);
-
-        vm.prank(minter);
-        fotToken.approve(address(fotPooler), type(uint256).max);
+        // Tokens already on pooler (sent by minter's transferFrom)
+        fotToken.mint(address(fotPooler), amount);
 
         // Before dispatch, phUSD totalSupply is 0
         assertEq(phUSDToken.totalSupply(), 0);
 
         // Should not revert
+        vm.prank(minter);
         fotPooler.dispatch(minter, amount);
 
         // phUSD should have been minted (in callback)
@@ -469,25 +476,23 @@ contract BalancerPoolerTest is Test {
             "Pool FOT/phUSD",
             owner
         );
+        fotPooler.setMinter(minter);
 
         uint256 amount = 100e18;
-        fotToken.mint(minter, amount);
+        // Tokens already on pooler (no transferFrom fee on this step)
+        fotToken.mint(address(fotPooler), amount);
 
         vm.prank(minter);
-        fotToken.approve(address(fotPooler), type(uint256).max);
-
         fotPooler.dispatch(minter, amount);
 
-        // First transfer: minter -> pooler (2% fee)
-        // actualReceived by pooler = 100e18 - 2e18 = 98e18
-        // Second transfer: pooler -> vault (2% fee on 98e18)
-        // actualPrimeInVault = 98e18 - (98e18 * 200 / 10000) = 98e18 - 1.96e18 = 96.04e18
-        uint256 expectedPrimeInVault = 9604e16; // 96.04e18
+        // Only ONE FOT fee now: pooler -> vault transfer (2% fee on 100e18)
+        // actualPrimeInVault = 100e18 - (100e18 * 200 / 10000) = 100e18 - 2e18 = 98e18
+        uint256 expectedPrimeInVault = 98e18;
 
         // Check settlements
         (address settledToken0, uint256 settledAmount0) = vault2.getSettlement(0);
         assertEq(settledToken0, address(fotToken), "First settlement should be FOT primeToken");
-        assertEq(settledAmount0, expectedPrimeInVault, "Prime settlement should match actual vault receipt after double FOT fee");
+        assertEq(settledAmount0, expectedPrimeInVault, "Prime settlement should match actual vault receipt after single FOT fee");
 
         (address settledToken1, uint256 settledAmount1) = vault2.getSettlement(1);
         assertEq(settledToken1, address(phUSDToken), "Second settlement should be phUSD");
@@ -513,13 +518,13 @@ contract BalancerPoolerTest is Test {
             "Pool FOT/phUSD",
             owner
         );
+        fotPooler.setMinter(minter);
 
         uint256 amount = 100e18;
-        fotToken.mint(minter, amount);
+        // Tokens already on pooler
+        fotToken.mint(address(fotPooler), amount);
 
         vm.prank(minter);
-        fotToken.approve(address(fotPooler), type(uint256).max);
-
         fotPooler.dispatch(minter, amount);
 
         // No tokens should be stuck in the pooler
@@ -530,11 +535,10 @@ contract BalancerPoolerTest is Test {
     function test_dispatch_standardToken_stillWorksIdentically() public {
         // This tests that a standard (non-FOT) token still works correctly after changes
         uint256 amount = 100e18;
-        primeToken.mint(minter, amount);
+        // Tokens already on pooler
+        primeToken.mint(address(pooler), amount);
 
         vm.prank(minter);
-        primeToken.approve(address(pooler), type(uint256).max);
-
         pooler.dispatch(minter, amount);
 
         // Verify standard behavior

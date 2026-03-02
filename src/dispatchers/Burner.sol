@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ATokenDispatcher} from "./ATokenDispatcher.sol";
 import {ITokenDispatcher} from "../interfaces/ITokenDispatcher.sol";
 import {IBurnable} from "../interfaces/IBurnable.sol";
 
 /// @title Burner
 /// @notice A token dispatcher that burns the prime token received from minting.
-/// @dev Calls IBurnable.burn(amount) on the token after pulling it from the minter.
+/// @dev Tokens arrive directly on this contract via the minter's transferFrom. Calls IBurnable.burn(amount).
 contract Burner is ATokenDispatcher {
     address private immutable _token;
     string private _flavour;
@@ -28,14 +27,9 @@ contract Burner is ATokenDispatcher {
         return _flavour;
     }
 
-    /// @notice Pulls prime tokens from the minter and burns them.
-    function dispatch(address minter, uint256 amount) external override whenNotPaused {
-        // Pull the prime token from the minter (balance-before/after for FOT safety)
-        uint256 balanceBefore = IERC20(_token).balanceOf(address(this));
-        IERC20(_token).transferFrom(minter, address(this), amount);
-        uint256 actualReceived = IERC20(_token).balanceOf(address(this)) - balanceBefore;
-
-        // Burn the actual received amount
-        IBurnable(_token).burn(actualReceived);
+    /// @notice Burns tokens already on this contract.
+    /// @param amount The FOT-adjusted amount of prime token to burn.
+    function dispatch(address, uint256 amount) external override onlyMinter whenNotPaused {
+        IBurnable(_token).burn(amount);
     }
 }
