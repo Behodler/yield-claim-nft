@@ -12,7 +12,7 @@ import {AddLiquidityParams, AddLiquidityKind} from "../interfaces/balancer/Balan
 
 /// @title BalancerPooler
 /// @notice A token dispatcher that mints phUSD to match incoming prime token amounts,
-///         then donates both tokens to a Balancer V3 pool.
+///         then adds unbalanced liquidity to a Balancer V3 pool, receiving BPT in return.
 /// @dev Implements IUnlockCallback to interact with the Balancer V3 vault's unlock pattern.
 contract BalancerPooler is ATokenDispatcher, IUnlockCallback {
     address private immutable _primeToken;
@@ -60,9 +60,11 @@ contract BalancerPooler is ATokenDispatcher, IUnlockCallback {
     }
 
     /// @notice Dispatches tokens (already on this contract) to the Balancer pool via unlock pattern.
-    /// @param amount The FOT-adjusted amount of prime token to donate.
-    function dispatch(address, uint256 amount, bytes calldata /* extraData */) external override onlyMinter whenNotPaused {
-        bytes memory data = abi.encode(amount);
+    /// @param amount The FOT-adjusted amount of prime token to dispatch.
+    /// @param extraData Optional ABI-encoded uint256 for minBptAmountOut slippage protection.
+    function dispatch(address, uint256 amount, bytes calldata extraData) external override onlyMinter whenNotPaused {
+        uint256 minBptAmountOut = extraData.length > 0 ? abi.decode(extraData, (uint256)) : 0;
+        bytes memory data = abi.encode(amount, minBptAmountOut);
         IBalancerVault(_vault).unlock(data);
     }
 
@@ -70,7 +72,7 @@ contract BalancerPooler is ATokenDispatcher, IUnlockCallback {
     function unlockCallback(bytes calldata data) external returns (bytes memory) {
         require(msg.sender == _vault, "BalancerPooler: caller is not vault");
 
-        uint256 primeAmount = abi.decode(data, (uint256));
+        (uint256 primeAmount, uint256 minBptAmountOut) = abi.decode(data, (uint256, uint256));
 
         // Transfer primeToken to vault (balance-before/after for FOT safety)
         uint256 vaultPrimeBefore = IERC20(_primeToken).balanceOf(_vault);
@@ -95,8 +97,8 @@ contract BalancerPooler is ATokenDispatcher, IUnlockCallback {
             pool: _pool,
             to: address(this),
             maxAmountsIn: maxAmountsIn,
-            minBptAmountOut: 0,
-            kind: AddLiquidityKind.DONATION,
+            minBptAmountOut: minBptAmountOut,
+            kind: AddLiquidityKind.UNBALANCED,
             userData: ""
         });
 
@@ -105,6 +107,13 @@ contract BalancerPooler is ATokenDispatcher, IUnlockCallback {
         IBalancerVault(_vault).settle(IERC20(_phUSD), phUSDAmount);
 
         return "";
+    }
+
+    /// @notice Withdraws BPT tokens held by this contract to a recipient.
+    /// @param recipient The address to receive the BPT tokens.
+    /// @param amount The amount of BPT tokens to withdraw.
+    function withdrawBPT(address recipient, uint256 amount) external onlyOwner {
+        IERC20(_pool).transfer(recipient, amount);
     }
 
     /// @notice Normalizes a prime token amount to phUSD decimals.

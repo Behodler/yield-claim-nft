@@ -82,9 +82,17 @@ contract MockBalancerVault {
 
         addLiquidityCalled = true;
 
-        // Return dummy values
+        // Simulate BPT minting: mint sum of maxAmountsIn as BPT to params.to
+        uint256 totalIn;
+        for (uint256 i = 0; i < params.maxAmountsIn.length; i++) {
+            totalIn += params.maxAmountsIn[i];
+        }
+        // Revert if below minBptAmountOut (simulating Balancer behavior)
+        require(totalIn >= params.minBptAmountOut, "BPT_OUT_MIN_AMOUNT");
+        MockERC20(params.pool).mint(params.to, totalIn);
+
         amountsIn = params.maxAmountsIn;
-        bptAmountOut = 0;
+        bptAmountOut = totalIn;
         returnData = "";
     }
 
@@ -127,7 +135,7 @@ contract BalancerPoolerTest is Test {
     MockERC20 public primeToken;
     MockMintableToken public phUSDToken;
     MockBalancerVault public mockVault;
-    address public pool = address(0xA001);
+    MockERC20 public bptToken; // BPT token (pool address in Balancer V3)
     address public owner = address(this);
     address public minter = address(0xBEEF);
     address public nonOwner = address(0xCAFE);
@@ -135,11 +143,12 @@ contract BalancerPoolerTest is Test {
     function setUp() public {
         primeToken = new MockERC20("Prime Token", "PRM", 18);
         phUSDToken = new MockMintableToken("phUSD", "phUSD", 18);
+        bptToken = new MockERC20("Balancer Pool Token", "BPT", 18);
         mockVault = new MockBalancerVault();
         pooler = new BalancerPooler(
             address(primeToken),
             address(phUSDToken),
-            pool,
+            address(bptToken),
             address(mockVault),
             true, // primeTokenIsFirst
             "Pool PRM/phUSD",
@@ -261,7 +270,7 @@ contract BalancerPoolerTest is Test {
         BalancerPooler pooler6 = new BalancerPooler(
             address(primeToken6),
             address(phUSD18),
-            pool,
+            address(bptToken),
             address(vault2),
             true,
             "Pool USDC/phUSD",
@@ -295,7 +304,7 @@ contract BalancerPoolerTest is Test {
         BalancerPooler pooler6 = new BalancerPooler(
             address(primeToken6),
             address(phUSD18),
-            pool,
+            address(bptToken),
             address(vault2),
             true,
             "Pool USDC/phUSD",
@@ -338,7 +347,7 @@ contract BalancerPoolerTest is Test {
         BalancerPooler poolerReversed = new BalancerPooler(
             address(primeToken),
             address(phUSDToken),
-            pool,
+            address(bptToken),
             address(mockVault),
             false, // primeTokenIsFirst = false
             "Pool phUSD/PRM",
@@ -362,7 +371,7 @@ contract BalancerPoolerTest is Test {
     // dispatch tests - donation via vault
     // =========================================================================
 
-    function test_dispatch_donatesViaVault() public {
+    function test_dispatch_addsUnbalancedLiquidityViaVault() public {
         uint256 amount = 100e18;
         // Tokens already on pooler
         primeToken.mint(address(pooler), amount);
@@ -373,18 +382,18 @@ contract BalancerPoolerTest is Test {
         // Verify addLiquidity was called
         assertTrue(mockVault.addLiquidityCalled(), "addLiquidity should have been called");
 
-        // Verify DONATION kind
+        // Verify UNBALANCED kind
         assertEq(
             uint256(mockVault.getLastParamsKind()),
-            uint256(AddLiquidityKind.DONATION),
-            "addLiquidity should use DONATION kind"
+            uint256(AddLiquidityKind.UNBALANCED),
+            "addLiquidity should use UNBALANCED kind"
         );
 
         // Verify correct pool
-        assertEq(mockVault.getLastParamsPool(), pool, "Donation should use the correct pool address");
+        assertEq(mockVault.getLastParamsPool(), address(bptToken), "Should use the correct pool address");
 
-        // Verify minBptAmountOut is 0
-        assertEq(mockVault.getLastParamsMinBptAmountOut(), 0, "minBptAmountOut should be 0 for donation");
+        // Verify minBptAmountOut defaults to 0 with empty extraData
+        assertEq(mockVault.getLastParamsMinBptAmountOut(), 0, "minBptAmountOut should be 0 with empty extraData");
     }
 
     // =========================================================================
@@ -394,7 +403,7 @@ contract BalancerPoolerTest is Test {
     function test_unlockCallback_revertsIfCallerIsNotVault() public {
         vm.prank(nonOwner);
         vm.expectRevert("BalancerPooler: caller is not vault");
-        pooler.unlockCallback(abi.encode(uint256(100e18)));
+        pooler.unlockCallback(abi.encode(uint256(100e18), uint256(0)));
     }
 
     // =========================================================================
@@ -436,7 +445,7 @@ contract BalancerPoolerTest is Test {
         BalancerPooler fotPooler = new BalancerPooler(
             address(fotToken),
             address(phUSDToken),
-            pool,
+            address(bptToken),
             address(vault2),
             true,
             "Pool FOT/phUSD",
@@ -470,7 +479,7 @@ contract BalancerPoolerTest is Test {
         BalancerPooler fotPooler = new BalancerPooler(
             address(fotToken),
             address(phUSDToken),
-            pool,
+            address(bptToken),
             address(vault2),
             true,
             "Pool FOT/phUSD",
@@ -512,7 +521,7 @@ contract BalancerPoolerTest is Test {
         BalancerPooler fotPooler = new BalancerPooler(
             address(fotToken),
             address(phUSDToken),
-            pool,
+            address(bptToken),
             address(vault2),
             true,
             "Pool FOT/phUSD",
@@ -560,5 +569,128 @@ contract BalancerPoolerTest is Test {
         (address settledToken1, uint256 settledAmount1) = mockVault.getSettlement(1);
         assertEq(settledToken1, address(phUSDToken));
         assertEq(settledAmount1, amount);
+    }
+
+    // =========================================================================
+    // dispatch tests - extraData / slippage protection
+    // =========================================================================
+
+    function test_dispatch_withExtraData_setsMinBptAmountOut() public {
+        uint256 amount = 100e18;
+        primeToken.mint(address(pooler), amount);
+
+        // Encode a minBptAmountOut of 150e18 via extraData
+        // (mock mints totalIn = 100e18 + 100e18 = 200e18, so 150e18 is valid)
+        uint256 minBpt = 150e18;
+        bytes memory extraData = abi.encode(minBpt);
+
+        vm.prank(minter);
+        pooler.dispatch(minter, amount, extraData);
+
+        // Verify the mock vault received the correct minBptAmountOut
+        assertEq(
+            mockVault.getLastParamsMinBptAmountOut(),
+            minBpt,
+            "minBptAmountOut should match the encoded extraData value"
+        );
+    }
+
+    function test_dispatch_withEmptyExtraData_defaultsMinBptToZero() public {
+        uint256 amount = 100e18;
+        primeToken.mint(address(pooler), amount);
+
+        vm.prank(minter);
+        pooler.dispatch(minter, amount, "");
+
+        // Verify the mock vault received 0 as minBptAmountOut
+        assertEq(
+            mockVault.getLastParamsMinBptAmountOut(),
+            0,
+            "minBptAmountOut should default to 0 when extraData is empty"
+        );
+    }
+
+    // =========================================================================
+    // BPT token accumulation tests
+    // =========================================================================
+
+    function test_dispatch_bptTokensHeldByDispatcher() public {
+        uint256 amount = 100e18;
+        primeToken.mint(address(pooler), amount);
+
+        // Before dispatch, pooler has no BPT
+        assertEq(bptToken.balanceOf(address(pooler)), 0, "Pooler should have 0 BPT before dispatch");
+
+        vm.prank(minter);
+        pooler.dispatch(minter, amount, "");
+
+        // Mock vault mints totalIn = primeAmount + phUSDAmount = 100e18 + 100e18 = 200e18
+        uint256 expectedBpt = 200e18;
+        assertEq(
+            bptToken.balanceOf(address(pooler)),
+            expectedBpt,
+            "Pooler should hold BPT tokens after dispatch"
+        );
+    }
+
+    function test_dispatch_multipleDispatchesAccumulateBPT() public {
+        uint256 amount1 = 50e18;
+        uint256 amount2 = 75e18;
+
+        // First dispatch
+        primeToken.mint(address(pooler), amount1);
+        vm.prank(minter);
+        pooler.dispatch(minter, amount1, "");
+
+        uint256 bptAfterFirst = bptToken.balanceOf(address(pooler));
+        // Mock mints totalIn = 50e18 + 50e18 = 100e18
+        assertEq(bptAfterFirst, 100e18, "BPT after first dispatch");
+
+        // Second dispatch
+        primeToken.mint(address(pooler), amount2);
+        vm.prank(minter);
+        pooler.dispatch(minter, amount2, "");
+
+        uint256 bptAfterSecond = bptToken.balanceOf(address(pooler));
+        // Mock mints totalIn = 75e18 + 75e18 = 150e18, accumulated with previous 100e18
+        assertEq(bptAfterSecond, 250e18, "BPT should accumulate across multiple dispatches");
+    }
+
+    // =========================================================================
+    // withdrawBPT tests
+    // =========================================================================
+
+    function test_withdrawBPT_transfersBptToRecipient() public {
+        uint256 amount = 100e18;
+        primeToken.mint(address(pooler), amount);
+
+        // Dispatch to accumulate BPT on pooler
+        vm.prank(minter);
+        pooler.dispatch(minter, amount, "");
+
+        uint256 poolerBpt = bptToken.balanceOf(address(pooler));
+        assertTrue(poolerBpt > 0, "Pooler should have BPT");
+
+        address recipient = address(0xDEAD);
+
+        // Owner withdraws BPT
+        pooler.withdrawBPT(recipient, poolerBpt);
+
+        assertEq(bptToken.balanceOf(recipient), poolerBpt, "Recipient should receive all BPT");
+        assertEq(bptToken.balanceOf(address(pooler)), 0, "Pooler should have 0 BPT after withdrawal");
+    }
+
+    function test_withdrawBPT_revertsWhenCalledByNonOwner() public {
+        uint256 amount = 100e18;
+        primeToken.mint(address(pooler), amount);
+
+        // Dispatch to accumulate BPT on pooler
+        vm.prank(minter);
+        pooler.dispatch(minter, amount, "");
+
+        // Non-owner tries to withdraw
+        vm.prank(nonOwner);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
+        pooler.withdrawBPT(nonOwner, 1e18);
     }
 }
