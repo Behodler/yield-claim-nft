@@ -6,6 +6,7 @@ import {NFTMinter} from "../src/NFTMinter.sol";
 import {Gather} from "../src/dispatchers/Gather.sol";
 import {ATokenDispatcher} from "../src/dispatchers/ATokenDispatcher.sol";
 import {Burner} from "../src/dispatchers/Burner.sol";
+import {BurnRecorder} from "../src/BurnRecorder.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {MockFOTToken} from "./mocks/MockFOTToken.sol";
@@ -38,6 +39,7 @@ contract NFTMinterTest is Test {
     MockERC20 public tokenB;
     Gather public gather;
     Burner public burner;
+    BurnRecorder public burnRecorder;
 
     address public owner = address(this);
     address public user = address(0xBEEF);
@@ -48,10 +50,11 @@ contract NFTMinterTest is Test {
         minter = new NFTMinter(owner);
         tokenA = new MockERC20("Token A", "TKA");
         tokenB = new MockERC20("Token B", "TKB");
+        burnRecorder = new BurnRecorder(owner);
 
         // Create dispatchers
         gather = new Gather(address(tokenA), gatherRecipient, "Gather TKA", owner);
-        burner = new Burner(address(tokenA), "Burn TKA", owner);
+        burner = new Burner(address(tokenA), "Burn TKA", address(burnRecorder), owner);
     }
 
     // =========================================================================
@@ -214,7 +217,7 @@ contract NFTMinterTest is Test {
     function test_mint_invokesDispatcher() public {
         // Register burner dispatcher with a burnable token - tokens go directly to burner and are burned
         MockBurnableERC20 burnableToken = new MockBurnableERC20("Burnable Token", "BRN");
-        Burner burnableDispatcher = new Burner(address(burnableToken), "Burn BRN", owner);
+        Burner burnableDispatcher = new Burner(address(burnableToken), "Burn BRN", address(burnRecorder), owner);
         burnableDispatcher.setMinter(address(minter));
         minter.registerDispatcher(address(burnableDispatcher), 10e18, 0);
 
@@ -263,7 +266,7 @@ contract NFTMinterTest is Test {
         // Register multiple dispatchers for tokenA
         Gather g1 = new Gather(address(tokenA), gatherRecipient, "Gather1", owner);
         Gather g2 = new Gather(address(tokenA), gatherRecipient, "Gather2", owner);
-        Burner burn1 = new Burner(address(tokenA), "Burn1", owner);
+        Burner burn1 = new Burner(address(tokenA), "Burn1", address(burnRecorder), owner);
 
         minter.registerDispatcher(address(g1), 10e18, 100);
         minter.registerDispatcher(address(g2), 20e18, 200);
