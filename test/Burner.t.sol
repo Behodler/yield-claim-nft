@@ -61,7 +61,10 @@ contract BurnerTest is Test {
 
     function setUp() public {
         token = new MockBurnableERC20("Burn Token", "BURN");
-        burnRecorder = new BurnRecorder(owner);
+        // Predict the burner address so BurnRecorder can authorize it as minter.
+        // BurnRecorder is deployed at nonce N, Burner at nonce N+1.
+        address predictedBurner = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
+        burnRecorder = new BurnRecorder(owner, predictedBurner);
         burner = new Burner(address(token), "Burn BURN", address(burnRecorder), owner);
         // Set the minter so dispatch() can be called via onlyMinter
         burner.setMinter(minter);
@@ -137,7 +140,10 @@ contract BurnerTest is Test {
     function test_dispatch_FOTToken_noRevert_tokensBurned() public {
         // Create a burnable FOT token with 2% fee (200 bps)
         MockBurnableFOTToken fotToken = new MockBurnableFOTToken("FOT Burn Token", "FOTBURN", 200);
-        Burner fotBurner = new Burner(address(fotToken), "Burn FOTBURN", address(burnRecorder), owner);
+        // Predict the fotBurner address so BurnRecorder can authorize it as minter.
+        address predictedFotBurner = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
+        BurnRecorder fotBurnRecorder = new BurnRecorder(owner, predictedFotBurner);
+        Burner fotBurner = new Burner(address(fotToken), "Burn FOTBURN", address(fotBurnRecorder), owner);
         fotBurner.setMinter(minter);
 
         uint256 amount = 100e18;
@@ -156,7 +162,10 @@ contract BurnerTest is Test {
     function test_dispatch_FOTToken_zeroTokensStuckInBurner() public {
         // Create a burnable FOT token with 3% fee (300 bps)
         MockBurnableFOTToken fotToken = new MockBurnableFOTToken("FOT Burn Token", "FOTBURN", 300);
-        Burner fotBurner = new Burner(address(fotToken), "Burn FOTBURN", address(burnRecorder), owner);
+        // Predict the fotBurner address so BurnRecorder can authorize it as minter.
+        address predictedFotBurner = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
+        BurnRecorder fotBurnRecorder = new BurnRecorder(owner, predictedFotBurner);
+        Burner fotBurner = new Burner(address(fotToken), "Burn FOTBURN", address(fotBurnRecorder), owner);
         fotBurner.setMinter(minter);
 
         uint256 amount = 100e18;

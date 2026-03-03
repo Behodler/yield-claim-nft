@@ -9,13 +9,14 @@ contract BurnRecorderTest is Test {
     BurnRecorder public recorder;
 
     address public owner = address(this);
+    address public minter = address(this);
     address public nonOwner = address(0xBEEF);
     address public tokenA = address(0xA);
     address public tokenB = address(0xB);
     address public tokenC = address(0xC);
 
     function setUp() public {
-        recorder = new BurnRecorder(owner);
+        recorder = new BurnRecorder(owner, minter);
     }
 
     // =========================================================================
@@ -76,6 +77,13 @@ contract BurnRecorderTest is Test {
         assertEq(recorder.getTotalBurnt(tokenA), 150e18, "TokenA total should be 150e18");
         assertEq(recorder.getTotalBurnt(tokenB), 200e18, "TokenB total should be 200e18");
         assertEq(recorder.getTotalBurnt(tokenC), 0, "TokenC total should be 0 (never burned)");
+    }
+
+    /// @notice Test that burn reverts when called by non-minter.
+    function test_burn_revertsForNonMinter() public {
+        vm.prank(nonOwner);
+        vm.expectRevert("BurnRecorder: caller is not minter");
+        recorder.burn(tokenA, 100e18);
     }
 
     // =========================================================================

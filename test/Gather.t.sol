@@ -202,7 +202,9 @@ contract GatherTest is Test {
         assertEq(token.balanceOf(address(gather)), 0, "Gather should have 0 balance");
 
         // Verify NFT was minted
-        assertEq(nftMinter.balanceOf(nftRecipient, nftMinter.CLAIM_TOKEN_ID()), 1, "NFT recipient should have 1 claim NFT");
+        assertEq(
+            nftMinter.balanceOf(nftRecipient, nftMinter.CLAIM_TOKEN_ID()), 1, "NFT recipient should have 1 claim NFT"
+        );
     }
 
     // =========================================================================
@@ -227,7 +229,11 @@ contract GatherTest is Test {
         // Only ONE fee deduction (gather -> recipient), not double fee like before
         uint256 expectedRecipientBalance = 98e18;
 
-        assertEq(fotToken.balanceOf(recipientAddr), expectedRecipientBalance, "Recipient should receive tokens after single FOT fee");
+        assertEq(
+            fotToken.balanceOf(recipientAddr),
+            expectedRecipientBalance,
+            "Recipient should receive tokens after single FOT fee"
+        );
     }
 
     function test_dispatch_FOTToken_zeroTokensStuckInGather() public {

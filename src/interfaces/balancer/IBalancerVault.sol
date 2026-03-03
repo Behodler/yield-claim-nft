@@ -7,7 +7,8 @@ import {AddLiquidityParams} from "./BalancerTypes.sol";
 interface IBalancerVault {
     function unlock(bytes calldata data) external returns (bytes memory result);
     function addLiquidity(AddLiquidityParams memory params)
-        external returns (uint256[] memory amountsIn, uint256 bptAmountOut, bytes memory returnData);
+        external
+        returns (uint256[] memory amountsIn, uint256 bptAmountOut, bytes memory returnData);
     function settle(IERC20 token, uint256 amountHint) external returns (uint256 credit);
     function sendTo(IERC20 token, address to, uint256 amount) external;
 }

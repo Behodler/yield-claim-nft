@@ -268,13 +268,7 @@ contract BalancerPoolerTest is Test {
         MockBalancerVault vault2 = new MockBalancerVault();
 
         BalancerPooler pooler6 = new BalancerPooler(
-            address(primeToken6),
-            address(phUSD18),
-            address(bptToken),
-            address(vault2),
-            true,
-            "Pool USDC/phUSD",
-            owner
+            address(primeToken6), address(phUSD18), address(bptToken), address(vault2), true, "Pool USDC/phUSD", owner
         );
         pooler6.setMinter(minter);
 
@@ -302,13 +296,7 @@ contract BalancerPoolerTest is Test {
         MockBalancerVault vault2 = new MockBalancerVault();
 
         BalancerPooler pooler6 = new BalancerPooler(
-            address(primeToken6),
-            address(phUSD18),
-            address(bptToken),
-            address(vault2),
-            true,
-            "Pool USDC/phUSD",
-            owner
+            address(primeToken6), address(phUSD18), address(bptToken), address(vault2), true, "Pool USDC/phUSD", owner
         );
         pooler6.setMinter(minter);
 
@@ -443,13 +431,7 @@ contract BalancerPoolerTest is Test {
         MockBalancerVault vault2 = new MockBalancerVault();
 
         BalancerPooler fotPooler = new BalancerPooler(
-            address(fotToken),
-            address(phUSDToken),
-            address(bptToken),
-            address(vault2),
-            true,
-            "Pool FOT/phUSD",
-            owner
+            address(fotToken), address(phUSDToken), address(bptToken), address(vault2), true, "Pool FOT/phUSD", owner
         );
         fotPooler.setMinter(minter);
 
@@ -477,13 +459,7 @@ contract BalancerPoolerTest is Test {
         MockBalancerVault vault2 = new MockBalancerVault();
 
         BalancerPooler fotPooler = new BalancerPooler(
-            address(fotToken),
-            address(phUSDToken),
-            address(bptToken),
-            address(vault2),
-            true,
-            "Pool FOT/phUSD",
-            owner
+            address(fotToken), address(phUSDToken), address(bptToken), address(vault2), true, "Pool FOT/phUSD", owner
         );
         fotPooler.setMinter(minter);
 
@@ -501,7 +477,11 @@ contract BalancerPoolerTest is Test {
         // Check settlements
         (address settledToken0, uint256 settledAmount0) = vault2.getSettlement(0);
         assertEq(settledToken0, address(fotToken), "First settlement should be FOT primeToken");
-        assertEq(settledAmount0, expectedPrimeInVault, "Prime settlement should match actual vault receipt after single FOT fee");
+        assertEq(
+            settledAmount0,
+            expectedPrimeInVault,
+            "Prime settlement should match actual vault receipt after single FOT fee"
+        );
 
         (address settledToken1, uint256 settledAmount1) = vault2.getSettlement(1);
         assertEq(settledToken1, address(phUSDToken), "Second settlement should be phUSD");
@@ -519,13 +499,7 @@ contract BalancerPoolerTest is Test {
         MockBalancerVault vault2 = new MockBalancerVault();
 
         BalancerPooler fotPooler = new BalancerPooler(
-            address(fotToken),
-            address(phUSDToken),
-            address(bptToken),
-            address(vault2),
-            true,
-            "Pool FOT/phUSD",
-            owner
+            address(fotToken), address(phUSDToken), address(bptToken), address(vault2), true, "Pool FOT/phUSD", owner
         );
         fotPooler.setMinter(minter);
 
@@ -589,9 +563,7 @@ contract BalancerPoolerTest is Test {
 
         // Verify the mock vault received the correct minBptAmountOut
         assertEq(
-            mockVault.getLastParamsMinBptAmountOut(),
-            minBpt,
-            "minBptAmountOut should match the encoded extraData value"
+            mockVault.getLastParamsMinBptAmountOut(), minBpt, "minBptAmountOut should match the encoded extraData value"
         );
     }
 
@@ -604,9 +576,7 @@ contract BalancerPoolerTest is Test {
 
         // Verify the mock vault received 0 as minBptAmountOut
         assertEq(
-            mockVault.getLastParamsMinBptAmountOut(),
-            0,
-            "minBptAmountOut should default to 0 when extraData is empty"
+            mockVault.getLastParamsMinBptAmountOut(), 0, "minBptAmountOut should default to 0 when extraData is empty"
         );
     }
 
@@ -626,11 +596,7 @@ contract BalancerPoolerTest is Test {
 
         // Mock vault mints totalIn = primeAmount + phUSDAmount = 100e18 + 100e18 = 200e18
         uint256 expectedBpt = 200e18;
-        assertEq(
-            bptToken.balanceOf(address(pooler)),
-            expectedBpt,
-            "Pooler should hold BPT tokens after dispatch"
-        );
+        assertEq(bptToken.balanceOf(address(pooler)), expectedBpt, "Pooler should hold BPT tokens after dispatch");
     }
 
     function test_dispatch_multipleDispatchesAccumulateBPT() public {

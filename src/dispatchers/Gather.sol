@@ -56,7 +56,16 @@ contract Gather is ATokenDispatcher {
 
     /// @notice Forwards tokens (already on this contract) to the recipient.
     /// @param amount The FOT-adjusted amount of prime token to forward.
-    function dispatch(address, uint256 amount, bytes calldata /* extraData */) external override onlyMinter whenNotPaused {
+    function dispatch(
+        address,
+        uint256 amount,
+        bytes calldata /* extraData */
+    )
+        external
+        override
+        onlyMinter
+        whenNotPaused
+    {
         IERC20(_token).transfer(_recipient, amount);
     }
 }

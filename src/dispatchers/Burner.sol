@@ -14,7 +14,9 @@ contract Burner is ATokenDispatcher {
     IBurnRecorder private immutable _burnRecorder;
     string private _flavour;
 
-    constructor(address token_, string memory flavour_, address burnRecorder_, address initialOwner) ATokenDispatcher(initialOwner) {
+    constructor(address token_, string memory flavour_, address burnRecorder_, address initialOwner)
+        ATokenDispatcher(initialOwner)
+    {
         _token = token_;
         _flavour = flavour_;
         _burnRecorder = IBurnRecorder(burnRecorder_);
@@ -32,7 +34,16 @@ contract Burner is ATokenDispatcher {
 
     /// @notice Burns tokens already on this contract and records the burn.
     /// @param amount The FOT-adjusted amount of prime token to burn.
-    function dispatch(address, uint256 amount, bytes calldata /* extraData */) external override onlyMinter whenNotPaused {
+    function dispatch(
+        address,
+        uint256 amount,
+        bytes calldata /* extraData */
+    )
+        external
+        override
+        onlyMinter
+        whenNotPaused
+    {
         IBurnable(_token).burn(amount);
         _burnRecorder.burn(_token, amount);
     }

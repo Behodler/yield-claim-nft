@@ -34,11 +34,17 @@ contract NFTMinter is ERC1155, Ownable, ITokenMinter, IPausable {
 
     /// @notice Emitted when a new dispatcher is registered.
     event DispatcherRegistered(
-        uint256 indexed index, address indexed dispatcher, address indexed token, uint256 initialPrice, uint256 growthBasisPoints
+        uint256 indexed index,
+        address indexed dispatcher,
+        address indexed token,
+        uint256 initialPrice,
+        uint256 growthBasisPoints
     );
 
     /// @notice Emitted when a claim NFT is minted.
-    event ClaimMinted(address indexed recipient, uint256 indexed dispatcherIndex, address indexed token, uint256 pricePaid);
+    event ClaimMinted(
+        address indexed recipient, uint256 indexed dispatcherIndex, address indexed token, uint256 pricePaid
+    );
 
     /// @notice Emitted when a dispatcher's price is updated.
     event PriceUpdated(uint256 indexed index, uint256 oldPrice, uint256 newPrice);
@@ -92,7 +98,10 @@ contract NFTMinter is ERC1155, Ownable, ITokenMinter, IPausable {
     }
 
     /// @inheritdoc ITokenMinter
-    function registerDispatcher(address dispatcher, uint256 initialPrice, uint256 growthBasisPoints) external onlyOwner {
+    function registerDispatcher(address dispatcher, uint256 initialPrice, uint256 growthBasisPoints)
+        external
+        onlyOwner
+    {
         require(dispatcher != address(0), "NFTMinter: zero dispatcher address");
         require(dispatcherToIndex[dispatcher] == 0, "NFTMinter: dispatcher already registered");
 
@@ -103,7 +112,8 @@ contract NFTMinter is ERC1155, Ownable, ITokenMinter, IPausable {
         address token = ITokenDispatcher(dispatcher).primeToken();
 
         // Store configuration
-        configs[index] = DispatcherConfig({dispatcher: dispatcher, price: initialPrice, growthBasisPoints: growthBasisPoints});
+        configs[index] =
+            DispatcherConfig({dispatcher: dispatcher, price: initialPrice, growthBasisPoints: growthBasisPoints});
 
         // Update mappings
         dispatcherToIndex[dispatcher] = index;

@@ -42,5 +42,10 @@ abstract contract ATokenDispatcher is ITokenDispatcher, Pausable, Ownable {
     /// @param minter The NFTMinter contract address.
     /// @param amount The amount of prime token that was paid for this mint.
     /// @param extraData Dispatcher-specific encoded data (unused in base; reserved for future use).
-    function dispatch(address minter, uint256 amount, bytes calldata extraData) external virtual onlyMinter whenNotPaused {}
+    function dispatch(address minter, uint256 amount, bytes calldata extraData)
+        external
+        virtual
+        onlyMinter
+        whenNotPaused
+    {}
 }

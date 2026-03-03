@@ -50,7 +50,10 @@ contract NFTMinterTest is Test {
         minter = new NFTMinter(owner);
         tokenA = new MockERC20("Token A", "TKA");
         tokenB = new MockERC20("Token B", "TKB");
-        burnRecorder = new BurnRecorder(owner);
+        // Predict the burner address so BurnRecorder can authorize it as minter.
+        // BurnRecorder deploys at nonce N, Gather at N+1, Burner at N+2.
+        address predictedBurner = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 2);
+        burnRecorder = new BurnRecorder(owner, predictedBurner);
 
         // Create dispatchers
         gather = new Gather(address(tokenA), gatherRecipient, "Gather TKA", owner);
@@ -217,7 +220,10 @@ contract NFTMinterTest is Test {
     function test_mint_invokesDispatcher() public {
         // Register burner dispatcher with a burnable token - tokens go directly to burner and are burned
         MockBurnableERC20 burnableToken = new MockBurnableERC20("Burnable Token", "BRN");
-        Burner burnableDispatcher = new Burner(address(burnableToken), "Burn BRN", address(burnRecorder), owner);
+        // Predict the burnableDispatcher address so its BurnRecorder can authorize it as minter.
+        address predictedDispatcher = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
+        BurnRecorder localBurnRecorder = new BurnRecorder(owner, predictedDispatcher);
+        Burner burnableDispatcher = new Burner(address(burnableToken), "Burn BRN", address(localBurnRecorder), owner);
         burnableDispatcher.setMinter(address(minter));
         minter.registerDispatcher(address(burnableDispatcher), 10e18, 0);
 
@@ -327,7 +333,7 @@ contract NFTMinterTest is Test {
         minter.registerDispatcher(address(gather), 10e18, 100);
 
         minter.setGrowthFactor(1, 500);
-        (, , uint256 growthBps) = minter.configs(1);
+        (,, uint256 growthBps) = minter.configs(1);
         assertEq(growthBps, 500);
     }
 
@@ -933,6 +939,8 @@ contract NFTMinterTest is Test {
         assertEq(minter.balanceOf(recipient, minter.CLAIM_TOKEN_ID()), 2, "Second mint should produce 2 total NFTs");
 
         // Both mints should have forwarded tokens to gather recipient
-        assertEq(tokenA.balanceOf(gatherRecipient), 20e18, "Gather recipient should have received tokens from both mints");
+        assertEq(
+            tokenA.balanceOf(gatherRecipient), 20e18, "Gather recipient should have received tokens from both mints"
+        );
     }
 }
