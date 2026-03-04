@@ -7,10 +7,11 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 import {ITokenDispatcher} from "./interfaces/ITokenDispatcher.sol";
 import {ATokenDispatcher} from "./dispatchers/ATokenDispatcher.sol";
+import {INFTMinter} from "./interfaces/INFTMinter.sol";
 import {ITokenMinter} from "./interfaces/ITokenMinter.sol";
 import {IPausable} from "pauser/interfaces/IPausable.sol";
 
-contract NFTMinter is ERC1155, Ownable, ITokenMinter, IPausable {
+contract NFTMinter is ERC1155, Ownable, INFTMinter, IPausable {
     /// @notice Configuration for a registered dispatcher.
     struct DispatcherConfig {
         address dispatcher; // TokenDispatcher contract address
@@ -35,6 +36,9 @@ contract NFTMinter is ERC1155, Ownable, ITokenMinter, IPausable {
 
     /// @notice Reverse lookup: maps token ID to the dispatcher address that produces it.
     mapping(uint256 => address) public tokenIdToDispatcher;
+
+    /// @notice Maps addresses to whether they are authorized to burn NFTs.
+    mapping(address => bool) public authorizedBurners;
 
     /// @notice Emitted when a new dispatcher is registered.
     event DispatcherRegistered(
@@ -73,6 +77,12 @@ contract NFTMinter is ERC1155, Ownable, ITokenMinter, IPausable {
 
     /// @notice Emitted when a dispatcher's token ID override is set.
     event DispatcherTokenIdSet(address indexed dispatcher, uint256 indexed tokenId);
+
+    /// @notice Emitted when an authorized burner is set or unset.
+    event AuthorizedBurnerSet(address indexed burner, bool authorized);
+
+    /// @notice Emitted when a claim NFT is burned.
+    event ClaimBurned(address indexed holder, uint256 indexed tokenId, uint256 quantity);
 
     /// @notice The address authorized to pause/unpause this contract via the Global Pauser.
     address public pauser;
@@ -295,5 +305,23 @@ contract NFTMinter is ERC1155, Ownable, ITokenMinter, IPausable {
         }
 
         emit DispatcherActiveChanged(dispatcher, active);
+    }
+
+    /// @notice Sets or removes an address as an authorized burner. Only callable by owner.
+    /// @param burner The address to authorize or deauthorize.
+    /// @param authorized Whether the address is authorized to burn.
+    function setAuthorizedBurner(address burner, bool authorized) external onlyOwner {
+        authorizedBurners[burner] = authorized;
+        emit AuthorizedBurnerSet(burner, authorized);
+    }
+
+    /// @notice Burns claim NFTs from a holder. Only callable by authorized burners.
+    /// @param holder The address holding the NFTs to burn.
+    /// @param tokenId The token ID to burn.
+    /// @param quantity The number of tokens to burn.
+    function burn(address holder, uint256 tokenId, uint256 quantity) external {
+        require(authorizedBurners[msg.sender], "NFTMinter: caller is not authorized burner");
+        _burn(holder, tokenId, quantity);
+        emit ClaimBurned(holder, tokenId, quantity);
     }
 }

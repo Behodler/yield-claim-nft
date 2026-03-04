@@ -1054,4 +1054,102 @@ contract NFTMinterTest is Test {
         vm.expectRevert();
         minter.setDispatcherTokenId(address(gather), 42);
     }
+
+    // =========================================================================
+    // Authorized Burner & Burn tests
+    // =========================================================================
+
+    address public authorizedBurnerAddr = address(0xBBBB);
+
+    /// @dev Helper to register a dispatcher, mint an NFT to a holder, and return the token ID.
+    function _mintNFTToHolder(address holder) internal returns (uint256 tokenId) {
+        // Register gather dispatcher
+        minter.registerDispatcher(address(gather), 10e18, 0);
+        gather.setMinter(address(minter));
+
+        // Give holder tokens and approve
+        tokenA.mint(holder, 100e18);
+        vm.prank(holder);
+        tokenA.approve(address(minter), type(uint256).max);
+
+        // Mint NFT to holder
+        vm.prank(holder);
+        minter.mint(address(tokenA), 1, holder);
+
+        return 1; // default token ID = dispatcher index
+    }
+
+    function test_burn_authorizedBurnerCanBurnNFTs() public {
+        uint256 tokenId = _mintNFTToHolder(user);
+        assertEq(minter.balanceOf(user, tokenId), 1);
+
+        // Authorize burner
+        minter.setAuthorizedBurner(authorizedBurnerAddr, true);
+
+        // Burn
+        vm.prank(authorizedBurnerAddr);
+        minter.burn(user, tokenId, 1);
+
+        assertEq(minter.balanceOf(user, tokenId), 0);
+    }
+
+    function test_burn_unauthorizedAddressCannotBurn() public {
+        uint256 tokenId = _mintNFTToHolder(user);
+
+        // Try to burn without authorization
+        vm.prank(authorizedBurnerAddr);
+        vm.expectRevert("NFTMinter: caller is not authorized burner");
+        minter.burn(user, tokenId, 1);
+    }
+
+    function test_setAuthorizedBurner_togglesAuthorizationCorrectly() public {
+        // Initially not authorized
+        assertFalse(minter.authorizedBurners(authorizedBurnerAddr));
+
+        // Authorize
+        minter.setAuthorizedBurner(authorizedBurnerAddr, true);
+        assertTrue(minter.authorizedBurners(authorizedBurnerAddr));
+
+        // Deauthorize
+        minter.setAuthorizedBurner(authorizedBurnerAddr, false);
+        assertFalse(minter.authorizedBurners(authorizedBurnerAddr));
+    }
+
+    function test_setAuthorizedBurner_onlyOwner() public {
+        vm.prank(user);
+        vm.expectRevert();
+        minter.setAuthorizedBurner(authorizedBurnerAddr, true);
+    }
+
+    function test_burn_emitsClaimBurnedEvent() public {
+        uint256 tokenId = _mintNFTToHolder(user);
+
+        minter.setAuthorizedBurner(authorizedBurnerAddr, true);
+
+        vm.expectEmit(true, true, false, true);
+        emit NFTMinter.ClaimBurned(user, tokenId, 1);
+
+        vm.prank(authorizedBurnerAddr);
+        minter.burn(user, tokenId, 1);
+    }
+
+    function test_burn_revertsWhenHolderHasInsufficientBalance() public {
+        // Register dispatcher but don't mint any NFTs to user
+        minter.registerDispatcher(address(gather), 10e18, 0);
+        gather.setMinter(address(minter));
+
+        minter.setAuthorizedBurner(authorizedBurnerAddr, true);
+
+        // Try to burn when user has 0 balance
+        vm.prank(authorizedBurnerAddr);
+        vm.expectRevert();
+        minter.burn(user, 1, 1);
+    }
+
+    function test_setAuthorizedBurner_emitsAuthorizedBurnerSetEvent() public {
+        vm.expectEmit(true, false, false, true);
+        emit NFTMinter.AuthorizedBurnerSet(authorizedBurnerAddr, true);
+
+        minter.setAuthorizedBurner(authorizedBurnerAddr, true);
+    }
 }
