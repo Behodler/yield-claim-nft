@@ -4,15 +4,13 @@ pragma solidity ^0.8.20;
 import {ERC1155} from "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 import {ITokenDispatcher} from "./interfaces/ITokenDispatcher.sol";
 import {ATokenDispatcher} from "./dispatchers/ATokenDispatcher.sol";
 import {ITokenMinter} from "./interfaces/ITokenMinter.sol";
 import {IPausable} from "pauser/interfaces/IPausable.sol";
 
 contract NFTMinter is ERC1155, Ownable, ITokenMinter, IPausable {
-    /// @notice The single global claim NFT token ID.
-    uint256 public constant CLAIM_TOKEN_ID = 1;
-
     /// @notice Configuration for a registered dispatcher.
     struct DispatcherConfig {
         address dispatcher; // TokenDispatcher contract address
@@ -31,6 +29,12 @@ contract NFTMinter is ERC1155, Ownable, ITokenMinter, IPausable {
 
     /// @notice Maps token address to array of dispatcher indexes registered for that token.
     mapping(address => uint256[]) internal _tokenToIndexes;
+
+    /// @notice Maps dispatcher address to an owner-set token ID override (0 means use default index).
+    mapping(address => uint256) public dispatcherTokenIdOverride;
+
+    /// @notice Reverse lookup: maps token ID to the dispatcher address that produces it.
+    mapping(uint256 => address) public tokenIdToDispatcher;
 
     /// @notice Emitted when a new dispatcher is registered.
     event DispatcherRegistered(
@@ -66,6 +70,9 @@ contract NFTMinter is ERC1155, Ownable, ITokenMinter, IPausable {
 
     /// @notice Emitted when the contract is unpaused.
     event Unpaused(address indexed triggeredBy);
+
+    /// @notice Emitted when a dispatcher's token ID override is set.
+    event DispatcherTokenIdSet(address indexed dispatcher, uint256 indexed tokenId);
 
     /// @notice The address authorized to pause/unpause this contract via the Global Pauser.
     address public pauser;
@@ -119,7 +126,39 @@ contract NFTMinter is ERC1155, Ownable, ITokenMinter, IPausable {
         dispatcherToIndex[dispatcher] = index;
         _tokenToIndexes[token].push(index);
 
+        // Set default token ID mapping (index -> dispatcher)
+        tokenIdToDispatcher[index] = dispatcher;
+
         emit DispatcherRegistered(index, dispatcher, token, initialPrice, growthBasisPoints);
+    }
+
+    /// @notice Sets a custom token ID for a dispatcher. Only callable by owner.
+    /// @param dispatcher The dispatcher contract address.
+    /// @param tokenId The custom token ID to assign (must be non-zero).
+    function setDispatcherTokenId(address dispatcher, uint256 tokenId) external onlyOwner {
+        require(dispatcherToIndex[dispatcher] != 0, "NFTMinter: dispatcher not registered");
+        require(tokenId != 0, "NFTMinter: tokenId must be non-zero");
+        require(
+            tokenIdToDispatcher[tokenId] == address(0) || tokenIdToDispatcher[tokenId] == dispatcher,
+            "NFTMinter: tokenId already assigned to another dispatcher"
+        );
+
+        // Clean up old reverse mapping entry
+        uint256 oldTokenId = dispatcherTokenIdOverride[dispatcher];
+        if (oldTokenId != 0) {
+            // Had a previous override, clean it up
+            delete tokenIdToDispatcher[oldTokenId];
+        } else {
+            // Was using default (index), clean up the default entry
+            uint256 index = dispatcherToIndex[dispatcher];
+            delete tokenIdToDispatcher[index];
+        }
+
+        // Set the override and reverse mapping
+        dispatcherTokenIdOverride[dispatcher] = tokenId;
+        tokenIdToDispatcher[tokenId] = dispatcher;
+
+        emit DispatcherTokenIdSet(dispatcher, tokenId);
     }
 
     /// @inheritdoc ITokenMinter
@@ -159,18 +198,44 @@ contract NFTMinter is ERC1155, Ownable, ITokenMinter, IPausable {
         // Invoke the dispatcher with actual received amount (dispatch is on ATokenDispatcher with whenNotPaused guard)
         ATokenDispatcher(config.dispatcher).dispatch(address(this), actualReceived, extraData);
 
+        // Resolve token ID: use override if set, otherwise use dispatcher index
+        uint256 resolvedTokenId = dispatcherTokenIdOverride[config.dispatcher];
+        if (resolvedTokenId == 0) {
+            resolvedTokenId = index;
+        }
+
         // Mint 1 claim NFT to recipient
-        _mint(recipient, CLAIM_TOKEN_ID, 1, "");
+        _mint(recipient, resolvedTokenId, 1, "");
 
         emit ClaimMinted(recipient, index, token, price);
 
         return true;
     }
 
-    /// @inheritdoc ITokenMinter
-    function getFlavour(uint256 index) external view returns (string memory) {
-        require(configs[index].dispatcher != address(0), "NFTMinter: index not registered");
-        return ITokenDispatcher(configs[index].dispatcher).flavour();
+    /// @notice Returns metadata JSON for a given token ID by looking up its mapped dispatcher.
+    /// @param id The token ID.
+    /// @return The metadata JSON string, or empty string if no dispatcher is mapped.
+    function uri(uint256 id) public view override returns (string memory) {
+        address dispatcher = tokenIdToDispatcher[id];
+        if (dispatcher == address(0)) {
+            return "";
+        }
+
+        string memory dispatcherName = ITokenDispatcher(dispatcher).name();
+        string memory dispatcherImage = ITokenDispatcher(dispatcher).image();
+        string memory dispatcherDescription = ITokenDispatcher(dispatcher).description();
+
+        return string(
+            abi.encodePacked(
+                '{"name":"',
+                dispatcherName,
+                '","image":"',
+                dispatcherImage,
+                '","description":"',
+                dispatcherDescription,
+                '"}'
+            )
+        );
     }
 
     /// @inheritdoc ITokenMinter

@@ -56,8 +56,8 @@ contract NFTMinterTest is Test {
         burnRecorder = new BurnRecorder(owner, predictedBurner);
 
         // Create dispatchers
-        gather = new Gather(address(tokenA), gatherRecipient, "Gather TKA", owner);
-        burner = new Burner(address(tokenA), "Burn TKA", address(burnRecorder), owner);
+        gather = new Gather(address(tokenA), gatherRecipient, owner);
+        burner = new Burner(address(tokenA), address(burnRecorder), owner);
     }
 
     // =========================================================================
@@ -104,7 +104,7 @@ contract NFTMinterTest is Test {
         minter.registerDispatcher(address(gather), 10e18, 100);
         assertEq(minter.nextIndex(), 2);
 
-        Gather gather2 = new Gather(address(tokenB), gatherRecipient, "Gather TKB", owner);
+        Gather gather2 = new Gather(address(tokenB), gatherRecipient, owner);
         minter.registerDispatcher(address(gather2), 5e18, 200);
         assertEq(minter.nextIndex(), 3);
     }
@@ -154,7 +154,7 @@ contract NFTMinterTest is Test {
         // Gather forwarded tokens to its recipient
         assertEq(tokenA.balanceOf(gatherRecipient), 10e18, "Gather recipient should have received tokens");
         // Recipient got 1 claim NFT
-        assertEq(minter.balanceOf(recipient, minter.CLAIM_TOKEN_ID()), 1);
+        assertEq(minter.balanceOf(recipient, 1), 1);
     }
 
     function test_mint_revertsIfIndexNotRegistered() public {
@@ -223,7 +223,7 @@ contract NFTMinterTest is Test {
         // Predict the burnableDispatcher address so its BurnRecorder can authorize it as minter.
         address predictedDispatcher = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
         BurnRecorder localBurnRecorder = new BurnRecorder(owner, predictedDispatcher);
-        Burner burnableDispatcher = new Burner(address(burnableToken), "Burn BRN", address(localBurnRecorder), owner);
+        Burner burnableDispatcher = new Burner(address(burnableToken), address(localBurnRecorder), owner);
         burnableDispatcher.setMinter(address(minter));
         minter.registerDispatcher(address(burnableDispatcher), 10e18, 0);
 
@@ -270,9 +270,9 @@ contract NFTMinterTest is Test {
 
     function test_getDispatchers_returnsAllIndexesForToken() public {
         // Register multiple dispatchers for tokenA
-        Gather g1 = new Gather(address(tokenA), gatherRecipient, "Gather1", owner);
-        Gather g2 = new Gather(address(tokenA), gatherRecipient, "Gather2", owner);
-        Burner burn1 = new Burner(address(tokenA), "Burn1", address(burnRecorder), owner);
+        Gather g1 = new Gather(address(tokenA), gatherRecipient, owner);
+        Gather g2 = new Gather(address(tokenA), gatherRecipient, owner);
+        Burner burn1 = new Burner(address(tokenA), address(burnRecorder), owner);
 
         minter.registerDispatcher(address(g1), 10e18, 100);
         minter.registerDispatcher(address(g2), 20e18, 200);
@@ -283,22 +283,6 @@ contract NFTMinterTest is Test {
         assertEq(indexes[0], 1);
         assertEq(indexes[1], 2);
         assertEq(indexes[2], 3);
-    }
-
-    // =========================================================================
-    // getFlavour tests
-    // =========================================================================
-
-    function test_getFlavour_returnsCorrectString() public {
-        Gather g = new Gather(address(tokenA), gatherRecipient, "My Flavour", owner);
-        minter.registerDispatcher(address(g), 10e18, 100);
-
-        assertEq(minter.getFlavour(1), "My Flavour");
-    }
-
-    function test_getFlavour_revertsForUnregisteredIndex() public {
-        vm.expectRevert("NFTMinter: index not registered");
-        minter.getFlavour(999);
     }
 
     // =========================================================================
@@ -385,7 +369,7 @@ contract NFTMinterTest is Test {
         }
 
         // Recipient should have 5 claim NFTs
-        assertEq(minter.balanceOf(recipient, minter.CLAIM_TOKEN_ID()), 5);
+        assertEq(minter.balanceOf(recipient, 1), 5);
 
         // Price should have escalated correctly
         assertEq(minter.getPrice(1), expectedPrice);
@@ -545,7 +529,7 @@ contract NFTMinterTest is Test {
         vm.prank(user);
         bool success = minter.mint(address(tokenA), 1, recipient);
         assertTrue(success);
-        assertEq(minter.balanceOf(recipient, minter.CLAIM_TOKEN_ID()), 1);
+        assertEq(minter.balanceOf(recipient, 1), 1);
     }
 
     // =========================================================================
@@ -770,7 +754,7 @@ contract NFTMinterTest is Test {
         vm.prank(user);
         bool success = minter.mint(address(tokenA), 1, recipient);
         assertTrue(success);
-        assertEq(minter.balanceOf(recipient, minter.CLAIM_TOKEN_ID()), 1);
+        assertEq(minter.balanceOf(recipient, 1), 1);
     }
 
     function test_pauserGetter_returnsCorrectAddress() public {
@@ -798,7 +782,7 @@ contract NFTMinterTest is Test {
         assertTrue(minter.paused());
 
         // registerDispatcher should still work
-        Gather gather2 = new Gather(address(tokenB), gatherRecipient, "Gather2", owner);
+        Gather gather2 = new Gather(address(tokenB), gatherRecipient, owner);
         gather2.setMinter(address(minter));
         minter.registerDispatcher(address(gather2), 5e18, 200);
         (address dispatcher,,) = minter.configs(2);
@@ -823,7 +807,7 @@ contract NFTMinterTest is Test {
         MockFOTToken fotToken = new MockFOTToken("FOT Token", "FOT", 200);
 
         // Create Gather for FOT token
-        Gather fotGather = new Gather(address(fotToken), gatherRecipient, "Gather FOT", owner);
+        Gather fotGather = new Gather(address(fotToken), gatherRecipient, owner);
         fotGather.setMinter(address(minter));
 
         uint256 initialPrice = 100e18;
@@ -840,7 +824,7 @@ contract NFTMinterTest is Test {
 
         assertTrue(success, "Mint should succeed with FOT token");
         // Recipient should have 1 claim NFT
-        assertEq(minter.balanceOf(recipient, minter.CLAIM_TOKEN_ID()), 1, "Recipient should have 1 claim NFT");
+        assertEq(minter.balanceOf(recipient, 1), 1, "Recipient should have 1 claim NFT");
         // User loses exactly `price` from their balance (amount-fee transferred + fee burned)
         assertEq(fotToken.balanceOf(user), 1000e18 - initialPrice, "User should have lost exactly price from balance");
         // Minter should have 0 balance (tokens go directly to dispatcher)
@@ -856,7 +840,7 @@ contract NFTMinterTest is Test {
         MockFOTToken fotToken = new MockFOTToken("FOT Token", "FOT", 500);
 
         // Create Gather for FOT token
-        Gather fotGather = new Gather(address(fotToken), gatherRecipient, "Gather FOT", owner);
+        Gather fotGather = new Gather(address(fotToken), gatherRecipient, owner);
         fotGather.setMinter(address(minter));
 
         uint256 price = 100e18;
@@ -914,7 +898,7 @@ contract NFTMinterTest is Test {
         // Gather forwarded tokens to its recipient
         assertEq(tokenA.balanceOf(gatherRecipient), 10e18, "Gather recipient should have received tokens");
         // Recipient got 1 claim NFT
-        assertEq(minter.balanceOf(recipient, minter.CLAIM_TOKEN_ID()), 1, "Recipient should have 1 claim NFT");
+        assertEq(minter.balanceOf(recipient, 1), 1, "Recipient should have 1 claim NFT");
     }
 
     function test_mint_withEmptyExtraData_matchesBehaviorOf3ParamMint() public {
@@ -931,16 +915,143 @@ contract NFTMinterTest is Test {
         // First mint via 3-parameter overload
         vm.prank(user);
         minter.mint(address(tokenA), 1, recipient);
-        assertEq(minter.balanceOf(recipient, minter.CLAIM_TOKEN_ID()), 1, "First mint should produce 1 NFT");
+        assertEq(minter.balanceOf(recipient, 1), 1, "First mint should produce 1 NFT");
 
         // Second mint via 4-parameter overload with empty bytes
         vm.prank(user);
         minter.mint(address(tokenA), 1, recipient, "");
-        assertEq(minter.balanceOf(recipient, minter.CLAIM_TOKEN_ID()), 2, "Second mint should produce 2 total NFTs");
+        assertEq(minter.balanceOf(recipient, 1), 2, "Second mint should produce 2 total NFTs");
 
         // Both mints should have forwarded tokens to gather recipient
         assertEq(
             tokenA.balanceOf(gatherRecipient), 20e18, "Gather recipient should have received tokens from both mints"
         );
+    }
+
+    // =========================================================================
+    // Metadata tests (setMetadata, name, image, description)
+    // =========================================================================
+
+    function test_setMetadata_setsNameImageDescription() public {
+        gather.setMetadata("Gather NFT", "https://example.com/image.png", "A gather dispatcher NFT");
+
+        assertEq(gather.name(), "Gather NFT");
+        assertEq(gather.image(), "https://example.com/image.png");
+        assertEq(gather.description(), "A gather dispatcher NFT");
+    }
+
+    function test_metadata_gettersReturnCorrectValues() public {
+        gather.setMetadata("Test Name", "ipfs://QmTest", "Test description");
+
+        assertEq(gather.name(), "Test Name");
+        assertEq(gather.image(), "ipfs://QmTest");
+        assertEq(gather.description(), "Test description");
+    }
+
+    function test_setMetadata_onlyOwner() public {
+        vm.prank(user);
+        vm.expectRevert();
+        gather.setMetadata("Name", "Image", "Description");
+    }
+
+    // =========================================================================
+    // Per-dispatcher token ID tests
+    // =========================================================================
+
+    function test_mint_defaultsToDispatcherIndexAsTokenId() public {
+        // Register gather dispatcher (will be index 1)
+        uint256 price = 10e18;
+        minter.registerDispatcher(address(gather), price, 0);
+        gather.setMinter(address(minter));
+
+        // Give user tokens and approve
+        tokenA.mint(user, 100e18);
+        vm.prank(user);
+        tokenA.approve(address(minter), type(uint256).max);
+
+        // Mint
+        vm.prank(user);
+        minter.mint(address(tokenA), 1, recipient);
+
+        // Default token ID should be the dispatcher index (1)
+        assertEq(minter.balanceOf(recipient, 1), 1, "Recipient should have 1 NFT with token ID = dispatcher index");
+        assertEq(minter.balanceOf(recipient, 2), 0, "Recipient should have 0 NFTs with other token IDs");
+    }
+
+    function test_setDispatcherTokenId_overridesDefaultTokenId() public {
+        minter.registerDispatcher(address(gather), 10e18, 0);
+
+        // Override to token ID 42
+        minter.setDispatcherTokenId(address(gather), 42);
+
+        assertEq(minter.dispatcherTokenIdOverride(address(gather)), 42);
+        assertEq(minter.tokenIdToDispatcher(42), address(gather));
+        // Old default mapping should be cleaned up
+        assertEq(minter.tokenIdToDispatcher(1), address(0));
+    }
+
+    function test_setDispatcherTokenId_revertsForUnregisteredDispatcher() public {
+        vm.expectRevert("NFTMinter: dispatcher not registered");
+        minter.setDispatcherTokenId(address(0xDEAD), 42);
+    }
+
+    function test_setDispatcherTokenId_revertsForDuplicateTokenId() public {
+        // Register two dispatchers
+        Gather gather2 = new Gather(address(tokenB), gatherRecipient, owner);
+        minter.registerDispatcher(address(gather), 10e18, 0);
+        minter.registerDispatcher(address(gather2), 10e18, 0);
+
+        // Override gather to token ID 42
+        minter.setDispatcherTokenId(address(gather), 42);
+
+        // Try to assign same token ID to gather2 - should revert
+        vm.expectRevert("NFTMinter: tokenId already assigned to another dispatcher");
+        minter.setDispatcherTokenId(address(gather2), 42);
+    }
+
+    function test_mint_usesOverriddenTokenIdWhenSet() public {
+        uint256 price = 10e18;
+        minter.registerDispatcher(address(gather), price, 0);
+        gather.setMinter(address(minter));
+
+        // Override to token ID 99
+        minter.setDispatcherTokenId(address(gather), 99);
+
+        // Give user tokens and approve
+        tokenA.mint(user, 100e18);
+        vm.prank(user);
+        tokenA.approve(address(minter), type(uint256).max);
+
+        // Mint
+        vm.prank(user);
+        minter.mint(address(tokenA), 1, recipient);
+
+        // NFT should be minted with overridden token ID 99, not default 1
+        assertEq(minter.balanceOf(recipient, 99), 1, "Recipient should have 1 NFT with overridden token ID 99");
+        assertEq(minter.balanceOf(recipient, 1), 0, "Recipient should have 0 NFTs with default token ID 1");
+    }
+
+    function test_uri_returnsDispatcherMetadata() public {
+        minter.registerDispatcher(address(gather), 10e18, 0);
+        gather.setMetadata("Test NFT", "https://example.com/nft.png", "A test NFT");
+
+        string memory result = minter.uri(1);
+        assertEq(
+            result,
+            '{"name":"Test NFT","image":"https://example.com/nft.png","description":"A test NFT"}'
+        );
+    }
+
+    function test_uri_returnsEmptyStringForUnmappedTokenId() public {
+        string memory result = minter.uri(999);
+        assertEq(result, "", "uri should return empty string for unmapped token ID");
+    }
+
+    function test_setDispatcherTokenId_onlyOwner() public {
+        minter.registerDispatcher(address(gather), 10e18, 0);
+
+        vm.prank(user);
+        vm.expectRevert();
+        minter.setDispatcherTokenId(address(gather), 42);
     }
 }

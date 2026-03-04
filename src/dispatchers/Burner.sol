@@ -12,24 +12,17 @@ import {IBurnRecorder} from "../interfaces/IBurnRecorder.sol";
 contract Burner is ATokenDispatcher {
     address private immutable _token;
     IBurnRecorder private immutable _burnRecorder;
-    string private _flavour;
 
-    constructor(address token_, string memory flavour_, address burnRecorder_, address initialOwner)
+    constructor(address token_, address burnRecorder_, address initialOwner)
         ATokenDispatcher(initialOwner)
     {
         _token = token_;
-        _flavour = flavour_;
         _burnRecorder = IBurnRecorder(burnRecorder_);
     }
 
     /// @inheritdoc ITokenDispatcher
     function primeToken() external view returns (address) {
         return _token;
-    }
-
-    /// @inheritdoc ITokenDispatcher
-    function flavour() external view returns (string memory) {
-        return _flavour;
     }
 
     /// @notice Burns tokens already on this contract and records the burn.

@@ -65,7 +65,7 @@ contract BurnerTest is Test {
         // BurnRecorder is deployed at nonce N, Burner at nonce N+1.
         address predictedBurner = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
         burnRecorder = new BurnRecorder(owner, predictedBurner);
-        burner = new Burner(address(token), "Burn BURN", address(burnRecorder), owner);
+        burner = new Burner(address(token), address(burnRecorder), owner);
         // Set the minter so dispatch() can be called via onlyMinter
         burner.setMinter(minter);
     }
@@ -76,14 +76,6 @@ contract BurnerTest is Test {
 
     function test_primeToken_returnsCorrectAddress() public view {
         assertEq(burner.primeToken(), address(token));
-    }
-
-    // =========================================================================
-    // flavour tests
-    // =========================================================================
-
-    function test_flavour_returnsCorrectString() public view {
-        assertEq(burner.flavour(), "Burn BURN");
     }
 
     // =========================================================================
@@ -143,7 +135,7 @@ contract BurnerTest is Test {
         // Predict the fotBurner address so BurnRecorder can authorize it as minter.
         address predictedFotBurner = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
         BurnRecorder fotBurnRecorder = new BurnRecorder(owner, predictedFotBurner);
-        Burner fotBurner = new Burner(address(fotToken), "Burn FOTBURN", address(fotBurnRecorder), owner);
+        Burner fotBurner = new Burner(address(fotToken), address(fotBurnRecorder), owner);
         fotBurner.setMinter(minter);
 
         uint256 amount = 100e18;
@@ -165,7 +157,7 @@ contract BurnerTest is Test {
         // Predict the fotBurner address so BurnRecorder can authorize it as minter.
         address predictedFotBurner = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
         BurnRecorder fotBurnRecorder = new BurnRecorder(owner, predictedFotBurner);
-        Burner fotBurner = new Burner(address(fotToken), "Burn FOTBURN", address(fotBurnRecorder), owner);
+        Burner fotBurner = new Burner(address(fotToken), address(fotBurnRecorder), owner);
         fotBurner.setMinter(minter);
 
         uint256 amount = 100e18;

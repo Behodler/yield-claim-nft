@@ -23,11 +23,6 @@ interface ITokenMinter {
     /// @param growthBasisPoints Price growth per mint in basis points (100 = 1%).
     function registerDispatcher(address dispatcher, uint256 initialPrice, uint256 growthBasisPoints) external;
 
-    /// @notice Returns the flavour string for a given dispatcher index.
-    /// @param index The dispatcher index.
-    /// @return The flavour string.
-    function getFlavour(uint256 index) external view returns (string memory);
-
     /// @notice Returns the current mint price for a given dispatcher index.
     /// @param index The dispatcher index.
     /// @return The current price in token units.

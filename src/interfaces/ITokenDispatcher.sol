@@ -5,6 +5,12 @@ interface ITokenDispatcher {
     /// @notice Returns the primary token this dispatcher acts on.
     function primeToken() external view returns (address);
 
-    /// @notice Returns a human-readable metadata string describing this dispatcher (like ERC20 symbol).
-    function flavour() external view returns (string memory);
+    /// @notice Returns the name metadata for this dispatcher.
+    function name() external view returns (string memory);
+
+    /// @notice Returns the image metadata for this dispatcher.
+    function image() external view returns (string memory);
+
+    /// @notice Returns the description metadata for this dispatcher.
+    function description() external view returns (string memory);
 }

@@ -12,32 +12,24 @@ import {ITokenDispatcher} from "../interfaces/ITokenDispatcher.sol";
 contract Gather is ATokenDispatcher {
     address private immutable _token;
     address private _recipient;
-    string private _flavour;
 
     /// @notice Emitted when the recipient address is updated.
     event RecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
 
     /// @param token_ The prime token this dispatcher acts on.
     /// @param recipient_ The initial address to forward tokens to.
-    /// @param flavour_ A human-readable metadata string describing this dispatcher.
     /// @param initialOwner The initial owner of this dispatcher.
-    constructor(address token_, address recipient_, string memory flavour_, address initialOwner)
+    constructor(address token_, address recipient_, address initialOwner)
         ATokenDispatcher(initialOwner)
     {
         require(recipient_ != address(0), "Gather: zero recipient address");
         _token = token_;
         _recipient = recipient_;
-        _flavour = flavour_;
     }
 
     /// @inheritdoc ITokenDispatcher
     function primeToken() external view returns (address) {
         return _token;
-    }
-
-    /// @inheritdoc ITokenDispatcher
-    function flavour() external view returns (string memory) {
-        return _flavour;
     }
 
     /// @notice Returns the current recipient address where tokens are forwarded.

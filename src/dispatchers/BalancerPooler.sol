@@ -20,7 +20,6 @@ contract BalancerPooler is ATokenDispatcher, IUnlockCallback {
     address private immutable _pool;
     address private immutable _vault;
     bool private immutable _primeTokenIsFirst;
-    string private _flavour;
 
     constructor(
         address primeToken_,
@@ -28,7 +27,6 @@ contract BalancerPooler is ATokenDispatcher, IUnlockCallback {
         address pool_,
         address vault_,
         bool primeTokenIsFirst_,
-        string memory flavour_,
         address initialOwner
     ) ATokenDispatcher(initialOwner) {
         _primeToken = primeToken_;
@@ -36,17 +34,11 @@ contract BalancerPooler is ATokenDispatcher, IUnlockCallback {
         _pool = pool_;
         _vault = vault_;
         _primeTokenIsFirst = primeTokenIsFirst_;
-        _flavour = flavour_;
     }
 
     /// @inheritdoc ITokenDispatcher
     function primeToken() external view returns (address) {
         return _primeToken;
-    }
-
-    /// @inheritdoc ITokenDispatcher
-    function flavour() external view returns (string memory) {
-        return _flavour;
     }
 
     /// @notice Returns the phUSD token address.

@@ -151,7 +151,6 @@ contract BalancerPoolerTest is Test {
             address(bptToken),
             address(mockVault),
             true, // primeTokenIsFirst
-            "Pool PRM/phUSD",
             owner
         );
         // Set the minter so dispatch() can be called via onlyMinter
@@ -164,14 +163,6 @@ contract BalancerPoolerTest is Test {
 
     function test_primeToken_returnsCorrectAddress() public view {
         assertEq(pooler.primeToken(), address(primeToken));
-    }
-
-    // =========================================================================
-    // flavour tests
-    // =========================================================================
-
-    function test_flavour_returnsCorrectString() public view {
-        assertEq(pooler.flavour(), "Pool PRM/phUSD");
     }
 
     // =========================================================================
@@ -268,7 +259,7 @@ contract BalancerPoolerTest is Test {
         MockBalancerVault vault2 = new MockBalancerVault();
 
         BalancerPooler pooler6 = new BalancerPooler(
-            address(primeToken6), address(phUSD18), address(bptToken), address(vault2), true, "Pool USDC/phUSD", owner
+            address(primeToken6), address(phUSD18), address(bptToken), address(vault2), true, owner
         );
         pooler6.setMinter(minter);
 
@@ -296,7 +287,7 @@ contract BalancerPoolerTest is Test {
         MockBalancerVault vault2 = new MockBalancerVault();
 
         BalancerPooler pooler6 = new BalancerPooler(
-            address(primeToken6), address(phUSD18), address(bptToken), address(vault2), true, "Pool USDC/phUSD", owner
+            address(primeToken6), address(phUSD18), address(bptToken), address(vault2), true, owner
         );
         pooler6.setMinter(minter);
 
@@ -338,7 +329,6 @@ contract BalancerPoolerTest is Test {
             address(bptToken),
             address(mockVault),
             false, // primeTokenIsFirst = false
-            "Pool phUSD/PRM",
             owner
         );
         poolerReversed.setMinter(minter);
@@ -431,7 +421,7 @@ contract BalancerPoolerTest is Test {
         MockBalancerVault vault2 = new MockBalancerVault();
 
         BalancerPooler fotPooler = new BalancerPooler(
-            address(fotToken), address(phUSDToken), address(bptToken), address(vault2), true, "Pool FOT/phUSD", owner
+            address(fotToken), address(phUSDToken), address(bptToken), address(vault2), true, owner
         );
         fotPooler.setMinter(minter);
 
@@ -459,7 +449,7 @@ contract BalancerPoolerTest is Test {
         MockBalancerVault vault2 = new MockBalancerVault();
 
         BalancerPooler fotPooler = new BalancerPooler(
-            address(fotToken), address(phUSDToken), address(bptToken), address(vault2), true, "Pool FOT/phUSD", owner
+            address(fotToken), address(phUSDToken), address(bptToken), address(vault2), true, owner
         );
         fotPooler.setMinter(minter);
 
@@ -499,7 +489,7 @@ contract BalancerPoolerTest is Test {
         MockBalancerVault vault2 = new MockBalancerVault();
 
         BalancerPooler fotPooler = new BalancerPooler(
-            address(fotToken), address(phUSDToken), address(bptToken), address(vault2), true, "Pool FOT/phUSD", owner
+            address(fotToken), address(phUSDToken), address(bptToken), address(vault2), true, owner
         );
         fotPooler.setMinter(minter);
 

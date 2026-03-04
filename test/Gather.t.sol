@@ -27,7 +27,7 @@ contract GatherTest is Test {
 
     function setUp() public {
         token = new MockERC20("Gather Token", "GTH");
-        gather = new Gather(address(token), recipientAddr, "Gather GTH", owner);
+        gather = new Gather(address(token), recipientAddr, owner);
         // Set the minter so dispatch() can be called via onlyMinter
         gather.setMinter(minter);
     }
@@ -38,14 +38,6 @@ contract GatherTest is Test {
 
     function test_primeToken_returnsCorrectAddress() public view {
         assertEq(gather.primeToken(), address(token));
-    }
-
-    // =========================================================================
-    // flavour tests
-    // =========================================================================
-
-    function test_flavour_returnsCorrectString() public view {
-        assertEq(gather.flavour(), "Gather GTH");
     }
 
     // =========================================================================
@@ -160,7 +152,7 @@ contract GatherTest is Test {
 
     function test_constructor_revertsWithZeroRecipientAddress() public {
         vm.expectRevert("Gather: zero recipient address");
-        new Gather(address(token), address(0), "Gather GTH", owner);
+        new Gather(address(token), address(0), owner);
     }
 
     // =========================================================================
@@ -203,7 +195,7 @@ contract GatherTest is Test {
 
         // Verify NFT was minted
         assertEq(
-            nftMinter.balanceOf(nftRecipient, nftMinter.CLAIM_TOKEN_ID()), 1, "NFT recipient should have 1 claim NFT"
+            nftMinter.balanceOf(nftRecipient, 1), 1, "NFT recipient should have 1 claim NFT"
         );
     }
 
@@ -214,7 +206,7 @@ contract GatherTest is Test {
     function test_dispatch_FOTToken_noRevert_recipientGetsTokensAfterSingleFee() public {
         // Create a FOT token with 2% fee (200 bps)
         MockFOTToken fotToken = new MockFOTToken("FOT Token", "FOT", 200);
-        Gather fotGather = new Gather(address(fotToken), recipientAddr, "Gather FOT", owner);
+        Gather fotGather = new Gather(address(fotToken), recipientAddr, owner);
         fotGather.setMinter(minter);
 
         uint256 amount = 100e18;
@@ -239,7 +231,7 @@ contract GatherTest is Test {
     function test_dispatch_FOTToken_zeroTokensStuckInGather() public {
         // Create a FOT token with 3% fee (300 bps)
         MockFOTToken fotToken = new MockFOTToken("FOT Token", "FOT", 300);
-        Gather fotGather = new Gather(address(fotToken), recipientAddr, "Gather FOT", owner);
+        Gather fotGather = new Gather(address(fotToken), recipientAddr, owner);
         fotGather.setMinter(minter);
 
         uint256 amount = 100e18;
