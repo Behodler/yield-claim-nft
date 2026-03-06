@@ -3,7 +3,6 @@ pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
 import {BalancerPooler} from "../src/dispatchers/BalancerPooler.sol";
-import {IMintable} from "../src/interfaces/IMintable.sol";
 import {IUnlockCallback} from "../src/interfaces/balancer/IUnlockCallback.sol";
 import {AddLiquidityParams, AddLiquidityKind} from "../src/interfaces/balancer/BalancerTypes.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
@@ -20,23 +19,6 @@ contract MockERC20 is ERC20 {
 
     function mint(address to, uint256 amount) external {
         _mint(to, amount);
-    }
-
-    function decimals() public view override returns (uint8) {
-        return _customDecimals;
-    }
-}
-
-/// @dev Mock ERC20 that implements IMintable (represents phUSD). Actually mints tokens.
-contract MockMintableToken is ERC20, IMintable {
-    uint8 private _customDecimals;
-
-    constructor(string memory name_, string memory symbol_, uint8 decimals_) ERC20(name_, symbol_) {
-        _customDecimals = decimals_;
-    }
-
-    function mint(address recipient, uint256 amount) external override {
-        _mint(recipient, amount);
     }
 
     function decimals() public view override returns (uint8) {
@@ -133,7 +115,6 @@ contract MockBalancerVault {
 contract BalancerPoolerTest is Test {
     BalancerPooler public pooler;
     MockERC20 public primeToken;
-    MockMintableToken public phUSDToken;
     MockBalancerVault public mockVault;
     MockERC20 public bptToken; // BPT token (pool address in Balancer V3)
     address public owner = address(this);
@@ -142,12 +123,10 @@ contract BalancerPoolerTest is Test {
 
     function setUp() public {
         primeToken = new MockERC20("Prime Token", "PRM", 18);
-        phUSDToken = new MockMintableToken("phUSD", "phUSD", 18);
         bptToken = new MockERC20("Balancer Pool Token", "BPT", 18);
         mockVault = new MockBalancerVault();
         pooler = new BalancerPooler(
             address(primeToken),
-            address(phUSDToken),
             address(bptToken),
             address(mockVault),
             true, // primeTokenIsFirst
@@ -171,14 +150,6 @@ contract BalancerPoolerTest is Test {
 
     function test_vault_returnsCorrectAddress() public view {
         assertEq(pooler.vault(), address(mockVault));
-    }
-
-    // =========================================================================
-    // phUSD() getter test
-    // =========================================================================
-
-    function test_phUSD_returnsCorrectAddress() public view {
-        assertEq(pooler.phUSD(), address(phUSDToken));
     }
 
     // =========================================================================
@@ -209,98 +180,21 @@ contract BalancerPoolerTest is Test {
     }
 
     // =========================================================================
-    // dispatch tests - mints phUSD
+    // dispatch tests - no phUSD minted (single-sided join)
     // =========================================================================
 
-    function test_dispatch_mintsPhUSD() public {
+    function test_dispatch_noPhUSDMinted_singleSidedJoin() public {
         uint256 amount = 100e18;
-        // Tokens already on pooler
-        primeToken.mint(address(pooler), amount);
-
-        // Before dispatch, phUSD totalSupply is 0
-        assertEq(phUSDToken.totalSupply(), 0);
-
-        vm.prank(minter);
-        pooler.dispatch(minter, amount, "");
-
-        // phUSD was minted to pooler then transferred to vault during settlement
-        // So vault should hold the phUSD now
-        assertEq(phUSDToken.balanceOf(address(mockVault)), amount, "Vault should hold minted phUSD after settlement");
-    }
-
-    // =========================================================================
-    // dispatch tests - decimal normalization (18-to-18)
-    // =========================================================================
-
-    function test_dispatch_sameDecimals_equalRawAmounts() public {
-        // Both tokens are 18 decimals (setUp default)
-        uint256 amount = 50e18;
-        // Tokens already on pooler
         primeToken.mint(address(pooler), amount);
 
         vm.prank(minter);
         pooler.dispatch(minter, amount, "");
 
-        // With same decimals, phUSD amount should equal prime amount
+        // maxAmountsIn should have primeToken amount and 0 for phUSD slot
         uint256[] memory amounts = mockVault.getLastParamsMaxAmountsIn();
-        // primeTokenIsFirst = true, so amounts[0] = primeAmount, amounts[1] = phUSDAmount
-        assertEq(amounts[0], amount, "Prime amount should be 50e18");
-        assertEq(amounts[1], amount, "phUSD amount should equal prime amount for same decimals");
-    }
-
-    // =========================================================================
-    // dispatch tests - decimal normalization (6-to-18)
-    // =========================================================================
-
-    function test_dispatch_6to18_normalizes() public {
-        // Create 6-decimal prime token and 18-decimal phUSD
-        MockERC20 primeToken6 = new MockERC20("USDC-like", "USDC", 6);
-        MockMintableToken phUSD18 = new MockMintableToken("phUSD", "phUSD", 18);
-        MockBalancerVault vault2 = new MockBalancerVault();
-
-        BalancerPooler pooler6 = new BalancerPooler(
-            address(primeToken6), address(phUSD18), address(bptToken), address(vault2), true, owner
-        );
-        pooler6.setMinter(minter);
-
-        uint256 amount = 100e6; // 100 USDC (6 decimals)
-        // Tokens already on pooler
-        primeToken6.mint(address(pooler6), amount);
-
-        vm.prank(minter);
-        pooler6.dispatch(minter, amount, "");
-
-        uint256[] memory amounts = vault2.getLastParamsMaxAmountsIn();
-        // primeTokenIsFirst = true
-        assertEq(amounts[0], 100e6, "Prime amount in prime decimals");
-        assertEq(amounts[1], 100e18, "phUSD amount should be primeAmount * 10^12 for 6-to-18 normalization");
-    }
-
-    // =========================================================================
-    // dispatch tests - donation amounts in respective decimals
-    // =========================================================================
-
-    function test_dispatch_donationAmountsInRespectiveDecimals() public {
-        // Create 6-decimal prime token and 18-decimal phUSD
-        MockERC20 primeToken6 = new MockERC20("USDC-like", "USDC", 6);
-        MockMintableToken phUSD18 = new MockMintableToken("phUSD", "phUSD", 18);
-        MockBalancerVault vault2 = new MockBalancerVault();
-
-        BalancerPooler pooler6 = new BalancerPooler(
-            address(primeToken6), address(phUSD18), address(bptToken), address(vault2), true, owner
-        );
-        pooler6.setMinter(minter);
-
-        uint256 primeAmount = 50e6; // 50 USDC
-        // Tokens already on pooler
-        primeToken6.mint(address(pooler6), primeAmount);
-
-        vm.prank(minter);
-        pooler6.dispatch(minter, primeAmount, "");
-
-        // Check that vault received correct amounts in their respective decimals
-        assertEq(primeToken6.balanceOf(address(vault2)), 50e6, "Prime token donated in prime decimals (6)");
-        assertEq(phUSD18.balanceOf(address(vault2)), 50e18, "phUSD donated in phUSD decimals (18)");
+        // primeTokenIsFirst = true, so amounts[0] = primeAmount, amounts[1] = 0
+        assertEq(amounts[0], amount, "Prime amount should be 100e18");
+        assertEq(amounts[1], 0, "phUSD slot should be 0 for single-sided join");
     }
 
     // =========================================================================
@@ -310,7 +204,6 @@ contract BalancerPoolerTest is Test {
     function test_dispatch_primeTokenIsFirst_correctOrdering() public {
         // Default setUp has primeTokenIsFirst = true
         uint256 amount = 75e18;
-        // Tokens already on pooler
         primeToken.mint(address(pooler), amount);
 
         vm.prank(minter);
@@ -318,14 +211,13 @@ contract BalancerPoolerTest is Test {
 
         uint256[] memory amounts = mockVault.getLastParamsMaxAmountsIn();
         assertEq(amounts[0], amount, "maxAmountsIn[0] should be primeAmount when primeTokenIsFirst=true");
-        assertEq(amounts[1], amount, "maxAmountsIn[1] should be phUSDAmount when primeTokenIsFirst=true");
+        assertEq(amounts[1], 0, "maxAmountsIn[1] should be 0 (phUSD slot) when primeTokenIsFirst=true");
     }
 
     function test_dispatch_primeTokenIsSecond_correctOrdering() public {
         // Create pooler with primeTokenIsFirst = false
         BalancerPooler poolerReversed = new BalancerPooler(
             address(primeToken),
-            address(phUSDToken),
             address(bptToken),
             address(mockVault),
             false, // primeTokenIsFirst = false
@@ -334,14 +226,13 @@ contract BalancerPoolerTest is Test {
         poolerReversed.setMinter(minter);
 
         uint256 amount = 60e18;
-        // Tokens already on pooler
         primeToken.mint(address(poolerReversed), amount);
 
         vm.prank(minter);
         poolerReversed.dispatch(minter, amount, "");
 
         uint256[] memory amounts = mockVault.getLastParamsMaxAmountsIn();
-        assertEq(amounts[0], amount, "maxAmountsIn[0] should be phUSDAmount when primeTokenIsFirst=false");
+        assertEq(amounts[0], 0, "maxAmountsIn[0] should be 0 (phUSD slot) when primeTokenIsFirst=false");
         assertEq(amounts[1], amount, "maxAmountsIn[1] should be primeAmount when primeTokenIsFirst=false");
     }
 
@@ -390,54 +281,41 @@ contract BalancerPoolerTest is Test {
 
     function test_dispatch_settlementAmountsMatchVaultReceipts() public {
         uint256 amount = 100e18;
-        // Tokens already on pooler
         primeToken.mint(address(pooler), amount);
 
         vm.prank(minter);
         pooler.dispatch(minter, amount, "");
 
-        // Both settlements should match actual amounts
+        // Only primeToken settlement (no phUSD settlement)
         uint256 settlementsCount = mockVault.getSettlementsCount();
-        assertEq(settlementsCount, 2, "Should have 2 settlements (prime + phUSD)");
+        assertEq(settlementsCount, 1, "Should have 1 settlement (prime only)");
 
         // First settlement: primeToken
         (address settledToken0, uint256 settledAmount0) = mockVault.getSettlement(0);
         assertEq(settledToken0, address(primeToken), "First settlement should be primeToken");
         assertEq(settledAmount0, amount, "Prime settlement amount should match transferred amount");
-
-        // Second settlement: phUSD
-        (address settledToken1, uint256 settledAmount1) = mockVault.getSettlement(1);
-        assertEq(settledToken1, address(phUSDToken), "Second settlement should be phUSD");
-        assertEq(settledAmount1, amount, "phUSD settlement amount should match for same decimals");
     }
 
     // =========================================================================
     // FOT token dispatch tests (tokens already on pooler, only callback transfer has FOT fee)
     // =========================================================================
 
-    function test_dispatch_FOTToken_noRevert_phUSDMintedInCallback() public {
+    function test_dispatch_FOTToken_noRevert_singleSidedJoin() public {
         // Create an FOT prime token (2% fee)
         MockFOTToken fotToken = new MockFOTToken("FOT Token", "FOT", 200);
         MockBalancerVault vault2 = new MockBalancerVault();
 
         BalancerPooler fotPooler = new BalancerPooler(
-            address(fotToken), address(phUSDToken), address(bptToken), address(vault2), true, owner
+            address(fotToken), address(bptToken), address(vault2), true, owner
         );
         fotPooler.setMinter(minter);
 
         uint256 amount = 100e18;
-        // Tokens already on pooler (sent by minter's transferFrom)
         fotToken.mint(address(fotPooler), amount);
-
-        // Before dispatch, phUSD totalSupply is 0
-        assertEq(phUSDToken.totalSupply(), 0);
 
         // Should not revert
         vm.prank(minter);
         fotPooler.dispatch(minter, amount, "");
-
-        // phUSD should have been minted (in callback)
-        assertTrue(phUSDToken.totalSupply() > 0, "phUSD should have been minted in callback");
 
         // addLiquidity should have been called
         assertTrue(vault2.addLiquidityCalled(), "addLiquidity should have been called");
@@ -449,12 +327,11 @@ contract BalancerPoolerTest is Test {
         MockBalancerVault vault2 = new MockBalancerVault();
 
         BalancerPooler fotPooler = new BalancerPooler(
-            address(fotToken), address(phUSDToken), address(bptToken), address(vault2), true, owner
+            address(fotToken), address(bptToken), address(vault2), true, owner
         );
         fotPooler.setMinter(minter);
 
         uint256 amount = 100e18;
-        // Tokens already on pooler (no transferFrom fee on this step)
         fotToken.mint(address(fotPooler), amount);
 
         vm.prank(minter);
@@ -464,7 +341,10 @@ contract BalancerPoolerTest is Test {
         // actualPrimeInVault = 100e18 - (100e18 * 200 / 10000) = 100e18 - 2e18 = 98e18
         uint256 expectedPrimeInVault = 98e18;
 
-        // Check settlements
+        // Only 1 settlement (primeToken only, no phUSD)
+        uint256 settlementsCount = vault2.getSettlementsCount();
+        assertEq(settlementsCount, 1, "Should have 1 settlement (prime only)");
+
         (address settledToken0, uint256 settledAmount0) = vault2.getSettlement(0);
         assertEq(settledToken0, address(fotToken), "First settlement should be FOT primeToken");
         assertEq(
@@ -473,14 +353,10 @@ contract BalancerPoolerTest is Test {
             "Prime settlement should match actual vault receipt after single FOT fee"
         );
 
-        (address settledToken1, uint256 settledAmount1) = vault2.getSettlement(1);
-        assertEq(settledToken1, address(phUSDToken), "Second settlement should be phUSD");
-        assertEq(settledAmount1, expectedPrimeInVault, "phUSD settlement should match normalized actualPrimeInVault");
-
-        // maxAmountsIn should also match
+        // maxAmountsIn should have prime amount and 0 for phUSD
         uint256[] memory amounts = vault2.getLastParamsMaxAmountsIn();
         assertEq(amounts[0], expectedPrimeInVault, "maxAmountsIn[0] should be actualPrimeInVault");
-        assertEq(amounts[1], expectedPrimeInVault, "maxAmountsIn[1] should be phUSDAmount matching actualPrimeInVault");
+        assertEq(amounts[1], 0, "maxAmountsIn[1] should be 0 (phUSD slot)");
     }
 
     function test_dispatch_FOTToken_noStuckTokensInPooler() public {
@@ -489,12 +365,11 @@ contract BalancerPoolerTest is Test {
         MockBalancerVault vault2 = new MockBalancerVault();
 
         BalancerPooler fotPooler = new BalancerPooler(
-            address(fotToken), address(phUSDToken), address(bptToken), address(vault2), true, owner
+            address(fotToken), address(bptToken), address(vault2), true, owner
         );
         fotPooler.setMinter(minter);
 
         uint256 amount = 100e18;
-        // Tokens already on pooler
         fotToken.mint(address(fotPooler), amount);
 
         vm.prank(minter);
@@ -502,13 +377,11 @@ contract BalancerPoolerTest is Test {
 
         // No tokens should be stuck in the pooler
         assertEq(fotToken.balanceOf(address(fotPooler)), 0, "No FOT tokens should be stuck in pooler");
-        assertEq(phUSDToken.balanceOf(address(fotPooler)), 0, "No phUSD should be stuck in pooler");
     }
 
     function test_dispatch_standardToken_stillWorksIdentically() public {
-        // This tests that a standard (non-FOT) token still works correctly after changes
+        // This tests that a standard (non-FOT) token still works correctly
         uint256 amount = 100e18;
-        // Tokens already on pooler
         primeToken.mint(address(pooler), amount);
 
         vm.prank(minter);
@@ -517,22 +390,19 @@ contract BalancerPoolerTest is Test {
         // Verify standard behavior
         assertTrue(mockVault.addLiquidityCalled(), "addLiquidity should have been called");
 
-        // Vault should hold both tokens
+        // Vault should hold primeToken only (no phUSD)
         assertEq(primeToken.balanceOf(address(mockVault)), amount, "Vault should hold full primeToken amount");
-        assertEq(phUSDToken.balanceOf(address(mockVault)), amount, "Vault should hold matching phUSD amount");
 
         // Nothing stuck in pooler
         assertEq(primeToken.balanceOf(address(pooler)), 0, "No primeTokens should be stuck in pooler");
-        assertEq(phUSDToken.balanceOf(address(pooler)), 0, "No phUSD should be stuck in pooler");
 
-        // Settlements should match
+        // Only primeToken settlement
+        uint256 settlementsCount = mockVault.getSettlementsCount();
+        assertEq(settlementsCount, 1, "Should have 1 settlement (prime only)");
+
         (address settledToken0, uint256 settledAmount0) = mockVault.getSettlement(0);
         assertEq(settledToken0, address(primeToken));
         assertEq(settledAmount0, amount);
-
-        (address settledToken1, uint256 settledAmount1) = mockVault.getSettlement(1);
-        assertEq(settledToken1, address(phUSDToken));
-        assertEq(settledAmount1, amount);
     }
 
     // =========================================================================
@@ -543,9 +413,9 @@ contract BalancerPoolerTest is Test {
         uint256 amount = 100e18;
         primeToken.mint(address(pooler), amount);
 
-        // Encode a minBptAmountOut of 150e18 via extraData
-        // (mock mints totalIn = 100e18 + 100e18 = 200e18, so 150e18 is valid)
-        uint256 minBpt = 150e18;
+        // Encode a minBptAmountOut of 80e18 via extraData
+        // (mock mints totalIn = 100e18 + 0 = 100e18, so 80e18 is valid)
+        uint256 minBpt = 80e18;
         bytes memory extraData = abi.encode(minBpt);
 
         vm.prank(minter);
@@ -584,8 +454,8 @@ contract BalancerPoolerTest is Test {
         vm.prank(minter);
         pooler.dispatch(minter, amount, "");
 
-        // Mock vault mints totalIn = primeAmount + phUSDAmount = 100e18 + 100e18 = 200e18
-        uint256 expectedBpt = 200e18;
+        // Mock vault mints totalIn = primeAmount + 0 = 100e18 (single-sided)
+        uint256 expectedBpt = 100e18;
         assertEq(bptToken.balanceOf(address(pooler)), expectedBpt, "Pooler should hold BPT tokens after dispatch");
     }
 
@@ -599,8 +469,8 @@ contract BalancerPoolerTest is Test {
         pooler.dispatch(minter, amount1, "");
 
         uint256 bptAfterFirst = bptToken.balanceOf(address(pooler));
-        // Mock mints totalIn = 50e18 + 50e18 = 100e18
-        assertEq(bptAfterFirst, 100e18, "BPT after first dispatch");
+        // Mock mints totalIn = 50e18 + 0 = 50e18 (single-sided)
+        assertEq(bptAfterFirst, 50e18, "BPT after first dispatch");
 
         // Second dispatch
         primeToken.mint(address(pooler), amount2);
@@ -608,8 +478,8 @@ contract BalancerPoolerTest is Test {
         pooler.dispatch(minter, amount2, "");
 
         uint256 bptAfterSecond = bptToken.balanceOf(address(pooler));
-        // Mock mints totalIn = 75e18 + 75e18 = 150e18, accumulated with previous 100e18
-        assertEq(bptAfterSecond, 250e18, "BPT should accumulate across multiple dispatches");
+        // Mock mints totalIn = 75e18 + 0 = 75e18, accumulated with previous 50e18
+        assertEq(bptAfterSecond, 125e18, "BPT should accumulate across multiple dispatches");
     }
 
     // =========================================================================
