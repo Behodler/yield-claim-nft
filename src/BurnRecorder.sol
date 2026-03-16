@@ -9,8 +9,8 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 /// @dev Provides a unified event log and cumulative burn tracking per token.
 ///      The tokenIndex mapping simulates an array for enumeration of registered tokens.
 contract BurnRecorder is IBurnRecorder, Ownable {
-    /// @notice The authorized minter address that can record burns.
-    address private immutable _minter;
+    /// @notice The authorized burner address that can record burns.
+    address private _burner;
 
     /// @notice Cumulative amount burned per token address.
     mapping(address => uint256) private totalBurnt;
@@ -27,23 +27,26 @@ contract BurnRecorder is IBurnRecorder, Ownable {
     /// @param timestamp The block timestamp when the burn was recorded.
     event tokenBurnt(address indexed token, uint256 quantity, uint256 timestamp);
 
-    /// @notice Restricts function access to the authorized minter.
-    modifier onlyMinter() {
-        require(msg.sender == _minter, "BurnRecorder: caller is not minter");
+    /// @notice Restricts function access to the authorized burner.
+    modifier onlyBurner() {
+        require(msg.sender == _burner, "BurnRecorder: caller is not burner");
         _;
     }
 
     /// @param initialOwner The initial owner of this contract.
-    /// @param minter_ The authorized minter address that can record burns.
-    constructor(address initialOwner, address minter_) Ownable(initialOwner) {
-        _minter = minter_;
+    constructor(address initialOwner) Ownable(initialOwner) {}
+
+    /// @notice Sets the authorized burner address.
+    /// @param burner_ The address of the burner contract.
+    function setBurner(address burner_) external onlyOwner {
+        _burner = burner_;
     }
 
     /// @notice Records a burn event for a given token and amount.
     /// @dev Accumulates the total burned for the token and emits a tokenBurnt event.
     /// @param token The address of the token that was burned.
     /// @param amount The amount of tokens burned.
-    function burn(address token, uint256 amount) external onlyMinter {
+    function burn(address token, uint256 amount) external onlyBurner {
         totalBurnt[token] += amount;
         emit tokenBurnt(token, amount, block.timestamp);
     }

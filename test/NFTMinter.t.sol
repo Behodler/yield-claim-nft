@@ -50,14 +50,12 @@ contract NFTMinterTest is Test {
         minter = new NFTMinter(owner);
         tokenA = new MockERC20("Token A", "TKA");
         tokenB = new MockERC20("Token B", "TKB");
-        // Predict the burner address so BurnRecorder can authorize it as minter.
-        // BurnRecorder deploys at nonce N, Gather at N+1, Burner at N+2.
-        address predictedBurner = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 2);
-        burnRecorder = new BurnRecorder(owner, predictedBurner);
+        burnRecorder = new BurnRecorder(owner);
 
         // Create dispatchers
         gather = new Gather(address(tokenA), gatherRecipient, owner);
         burner = new Burner(address(tokenA), address(burnRecorder), owner);
+        burnRecorder.setBurner(address(burner));
     }
 
     // =========================================================================
@@ -220,10 +218,9 @@ contract NFTMinterTest is Test {
     function test_mint_invokesDispatcher() public {
         // Register burner dispatcher with a burnable token - tokens go directly to burner and are burned
         MockBurnableERC20 burnableToken = new MockBurnableERC20("Burnable Token", "BRN");
-        // Predict the burnableDispatcher address so its BurnRecorder can authorize it as minter.
-        address predictedDispatcher = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
-        BurnRecorder localBurnRecorder = new BurnRecorder(owner, predictedDispatcher);
+        BurnRecorder localBurnRecorder = new BurnRecorder(owner);
         Burner burnableDispatcher = new Burner(address(burnableToken), address(localBurnRecorder), owner);
+        localBurnRecorder.setBurner(address(burnableDispatcher));
         burnableDispatcher.setMinter(address(minter));
         minter.registerDispatcher(address(burnableDispatcher), 10e18, 0);
 
