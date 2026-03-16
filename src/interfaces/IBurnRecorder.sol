@@ -7,7 +7,8 @@ interface IBurnRecorder {
     /// @param amount The amount of tokens burned.
     function burn(address token, uint256 amount) external;
 
-    /// @notice Sets the authorized burner address.
+    /// @notice Sets or revokes an authorized burner address.
     /// @param burner_ The address of the burner contract.
-    function setBurner(address burner_) external;
+    /// @param approved_ Whether the address is authorized as a burner.
+    function setBurner(address burner_, bool approved_) external;
 }

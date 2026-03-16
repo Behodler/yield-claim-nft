@@ -63,7 +63,7 @@ contract BurnerTest is Test {
         token = new MockBurnableERC20("Burn Token", "BURN");
         burnRecorder = new BurnRecorder(owner);
         burner = new Burner(address(token), address(burnRecorder), owner);
-        burnRecorder.setBurner(address(burner));
+        burnRecorder.setBurner(address(burner), true);
         // Set the minter so dispatch() can be called via onlyMinter
         burner.setMinter(minter);
     }
@@ -132,7 +132,7 @@ contract BurnerTest is Test {
         MockBurnableFOTToken fotToken = new MockBurnableFOTToken("FOT Burn Token", "FOTBURN", 200);
         BurnRecorder fotBurnRecorder = new BurnRecorder(owner);
         Burner fotBurner = new Burner(address(fotToken), address(fotBurnRecorder), owner);
-        fotBurnRecorder.setBurner(address(fotBurner));
+        fotBurnRecorder.setBurner(address(fotBurner), true);
         fotBurner.setMinter(minter);
 
         uint256 amount = 100e18;
@@ -153,7 +153,7 @@ contract BurnerTest is Test {
         MockBurnableFOTToken fotToken = new MockBurnableFOTToken("FOT Burn Token", "FOTBURN", 300);
         BurnRecorder fotBurnRecorder = new BurnRecorder(owner);
         Burner fotBurner = new Burner(address(fotToken), address(fotBurnRecorder), owner);
-        fotBurnRecorder.setBurner(address(fotBurner));
+        fotBurnRecorder.setBurner(address(fotBurner), true);
         fotBurner.setMinter(minter);
 
         uint256 amount = 100e18;

@@ -9,8 +9,8 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 /// @dev Provides a unified event log and cumulative burn tracking per token.
 ///      The tokenIndex mapping simulates an array for enumeration of registered tokens.
 contract BurnRecorder is IBurnRecorder, Ownable {
-    /// @notice The authorized burner address that can record burns.
-    address private _burner;
+    /// @notice Mapping of authorized burner addresses that can record burns.
+    mapping(address => bool) private _burners;
 
     /// @notice Cumulative amount burned per token address.
     mapping(address => uint256) private totalBurnt;
@@ -27,19 +27,20 @@ contract BurnRecorder is IBurnRecorder, Ownable {
     /// @param timestamp The block timestamp when the burn was recorded.
     event tokenBurnt(address indexed token, uint256 quantity, uint256 timestamp);
 
-    /// @notice Restricts function access to the authorized burner.
+    /// @notice Restricts function access to authorized burners.
     modifier onlyBurner() {
-        require(msg.sender == _burner, "BurnRecorder: caller is not burner");
+        require(_burners[msg.sender], "BurnRecorder: caller is not burner");
         _;
     }
 
     /// @param initialOwner The initial owner of this contract.
     constructor(address initialOwner) Ownable(initialOwner) {}
 
-    /// @notice Sets the authorized burner address.
+    /// @notice Sets or revokes an authorized burner address.
     /// @param burner_ The address of the burner contract.
-    function setBurner(address burner_) external onlyOwner {
-        _burner = burner_;
+    /// @param approved_ Whether the address is authorized as a burner.
+    function setBurner(address burner_, bool approved_) external onlyOwner {
+        _burners[burner_] = approved_;
     }
 
     /// @notice Records a burn event for a given token and amount.

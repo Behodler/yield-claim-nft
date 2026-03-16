@@ -17,7 +17,7 @@ contract BurnRecorderTest is Test {
 
     function setUp() public {
         recorder = new BurnRecorder(owner);
-        recorder.setBurner(burnerAddr);
+        recorder.setBurner(burnerAddr, true);
     }
 
     // =========================================================================

@@ -55,7 +55,7 @@ contract NFTMinterTest is Test {
         // Create dispatchers
         gather = new Gather(address(tokenA), gatherRecipient, owner);
         burner = new Burner(address(tokenA), address(burnRecorder), owner);
-        burnRecorder.setBurner(address(burner));
+        burnRecorder.setBurner(address(burner), true);
     }
 
     // =========================================================================
@@ -220,7 +220,7 @@ contract NFTMinterTest is Test {
         MockBurnableERC20 burnableToken = new MockBurnableERC20("Burnable Token", "BRN");
         BurnRecorder localBurnRecorder = new BurnRecorder(owner);
         Burner burnableDispatcher = new Burner(address(burnableToken), address(localBurnRecorder), owner);
-        localBurnRecorder.setBurner(address(burnableDispatcher));
+        localBurnRecorder.setBurner(address(burnableDispatcher), true);
         burnableDispatcher.setMinter(address(minter));
         minter.registerDispatcher(address(burnableDispatcher), 10e18, 0);
 
