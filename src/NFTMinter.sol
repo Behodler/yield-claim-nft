@@ -17,6 +17,7 @@ contract NFTMinter is ERC1155, Ownable, INFTMinter, IPausable {
         address dispatcher; // TokenDispatcher contract address
         uint256 price; // current mint price in token units (18 decimals)
         uint256 growthBasisPoints; // price growth per mint in basis points (100 = 1%)
+        bool disabled; // if true, new mints are blocked but existing NFTs remain valid
     }
 
     /// @notice Auto-incrementing dispatcher index (starts at 1 so 0 is invalid).
@@ -30,9 +31,6 @@ contract NFTMinter is ERC1155, Ownable, INFTMinter, IPausable {
 
     /// @notice Maps token address to array of dispatcher indexes registered for that token.
     mapping(address => uint256[]) internal _tokenToIndexes;
-
-    /// @notice Maps dispatcher address to an owner-set token ID override (0 means use default index).
-    mapping(address => uint256) public dispatcherTokenIdOverride;
 
     /// @notice Reverse lookup: maps token ID to the dispatcher address that produces it.
     mapping(uint256 => address) public tokenIdToDispatcher;
@@ -75,8 +73,8 @@ contract NFTMinter is ERC1155, Ownable, INFTMinter, IPausable {
     /// @notice Emitted when the contract is unpaused.
     event Unpaused(address indexed triggeredBy);
 
-    /// @notice Emitted when a dispatcher's token ID override is set.
-    event DispatcherTokenIdSet(address indexed dispatcher, uint256 indexed tokenId);
+    /// @notice Emitted when a dispatcher's disabled state is changed.
+    event DispatcherDisabledChanged(uint256 indexed index, bool disabled);
 
     /// @notice Emitted when an authorized burner is set or unset.
     event AuthorizedBurnerSet(address indexed burner, bool authorized);
@@ -130,7 +128,7 @@ contract NFTMinter is ERC1155, Ownable, INFTMinter, IPausable {
 
         // Store configuration
         configs[index] =
-            DispatcherConfig({dispatcher: dispatcher, price: initialPrice, growthBasisPoints: growthBasisPoints});
+            DispatcherConfig({dispatcher: dispatcher, price: initialPrice, growthBasisPoints: growthBasisPoints, disabled: false});
 
         // Update mappings
         dispatcherToIndex[dispatcher] = index;
@@ -142,33 +140,13 @@ contract NFTMinter is ERC1155, Ownable, INFTMinter, IPausable {
         emit DispatcherRegistered(index, dispatcher, token, initialPrice, growthBasisPoints);
     }
 
-    /// @notice Sets a custom token ID for a dispatcher. Only callable by owner.
-    /// @param dispatcher The dispatcher contract address.
-    /// @param tokenId The custom token ID to assign (must be non-zero).
-    function setDispatcherTokenId(address dispatcher, uint256 tokenId) external onlyOwner {
-        require(dispatcherToIndex[dispatcher] != 0, "NFTMinter: dispatcher not registered");
-        require(tokenId != 0, "NFTMinter: tokenId must be non-zero");
-        require(
-            tokenIdToDispatcher[tokenId] == address(0) || tokenIdToDispatcher[tokenId] == dispatcher,
-            "NFTMinter: tokenId already assigned to another dispatcher"
-        );
-
-        // Clean up old reverse mapping entry
-        uint256 oldTokenId = dispatcherTokenIdOverride[dispatcher];
-        if (oldTokenId != 0) {
-            // Had a previous override, clean it up
-            delete tokenIdToDispatcher[oldTokenId];
-        } else {
-            // Was using default (index), clean up the default entry
-            uint256 index = dispatcherToIndex[dispatcher];
-            delete tokenIdToDispatcher[index];
-        }
-
-        // Set the override and reverse mapping
-        dispatcherTokenIdOverride[dispatcher] = tokenId;
-        tokenIdToDispatcher[tokenId] = dispatcher;
-
-        emit DispatcherTokenIdSet(dispatcher, tokenId);
+    /// @notice Enables or disables minting for a dispatcher. Only callable by owner.
+    /// @param index The dispatcher index.
+    /// @param disabled If true, new mints are blocked; if false, mints are re-enabled.
+    function setDispatcherDisabled(uint256 index, bool disabled) external onlyOwner {
+        require(configs[index].dispatcher != address(0), "NFTMinter: index not registered");
+        configs[index].disabled = disabled;
+        emit DispatcherDisabledChanged(index, disabled);
     }
 
     /// @inheritdoc ITokenMinter
@@ -189,6 +167,7 @@ contract NFTMinter is ERC1155, Ownable, INFTMinter, IPausable {
         require(!paused, "Contract is paused");
         DispatcherConfig storage config = configs[index];
         require(config.dispatcher != address(0), "NFTMinter: index not registered");
+        require(!config.disabled, "NFTMinter: dispatcher is disabled");
 
         // Sanity check: token address must match dispatcher's primeToken
         address dispatcherToken = ITokenDispatcher(config.dispatcher).primeToken();
@@ -208,11 +187,7 @@ contract NFTMinter is ERC1155, Ownable, INFTMinter, IPausable {
         // Invoke the dispatcher with actual received amount (dispatch is on ATokenDispatcher with whenNotPaused guard)
         ATokenDispatcher(config.dispatcher).dispatch(address(this), actualReceived, extraData);
 
-        // Resolve token ID: use override if set, otherwise use dispatcher index
-        uint256 resolvedTokenId = dispatcherTokenIdOverride[config.dispatcher];
-        if (resolvedTokenId == 0) {
-            resolvedTokenId = index;
-        }
+        uint256 resolvedTokenId = index;
 
         // Mint 1 claim NFT to recipient
         _mint(recipient, resolvedTokenId, 1, "");

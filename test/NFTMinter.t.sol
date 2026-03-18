@@ -68,7 +68,7 @@ contract NFTMinterTest is Test {
 
         minter.registerDispatcher(address(gather), initialPrice, growthBps);
 
-        (address dispatcher, uint256 price, uint256 growthBasisPoints) = minter.configs(1);
+        (address dispatcher, uint256 price, uint256 growthBasisPoints,) = minter.configs(1);
         assertEq(dispatcher, address(gather));
         assertEq(price, initialPrice);
         assertEq(growthBasisPoints, growthBps);
@@ -314,7 +314,7 @@ contract NFTMinterTest is Test {
         minter.registerDispatcher(address(gather), 10e18, 100);
 
         minter.setGrowthFactor(1, 500);
-        (,, uint256 growthBps) = minter.configs(1);
+        (,, uint256 growthBps,) = minter.configs(1);
         assertEq(growthBps, 500);
     }
 
@@ -782,7 +782,7 @@ contract NFTMinterTest is Test {
         Gather gather2 = new Gather(address(tokenB), gatherRecipient, owner);
         gather2.setMinter(address(minter));
         minter.registerDispatcher(address(gather2), 5e18, 200);
-        (address dispatcher,,) = minter.configs(2);
+        (address dispatcher,,,) = minter.configs(2);
         assertEq(dispatcher, address(gather2));
 
         // setPrice should still work
@@ -791,7 +791,7 @@ contract NFTMinterTest is Test {
 
         // setGrowthFactor should still work
         minter.setGrowthFactor(1, 500);
-        (,, uint256 growthBps) = minter.configs(1);
+        (,, uint256 growthBps,) = minter.configs(1);
         assertEq(growthBps, 500);
     }
 
@@ -975,59 +975,6 @@ contract NFTMinterTest is Test {
         assertEq(minter.balanceOf(recipient, 2), 0, "Recipient should have 0 NFTs with other token IDs");
     }
 
-    function test_setDispatcherTokenId_overridesDefaultTokenId() public {
-        minter.registerDispatcher(address(gather), 10e18, 0);
-
-        // Override to token ID 42
-        minter.setDispatcherTokenId(address(gather), 42);
-
-        assertEq(minter.dispatcherTokenIdOverride(address(gather)), 42);
-        assertEq(minter.tokenIdToDispatcher(42), address(gather));
-        // Old default mapping should be cleaned up
-        assertEq(minter.tokenIdToDispatcher(1), address(0));
-    }
-
-    function test_setDispatcherTokenId_revertsForUnregisteredDispatcher() public {
-        vm.expectRevert("NFTMinter: dispatcher not registered");
-        minter.setDispatcherTokenId(address(0xDEAD), 42);
-    }
-
-    function test_setDispatcherTokenId_revertsForDuplicateTokenId() public {
-        // Register two dispatchers
-        Gather gather2 = new Gather(address(tokenB), gatherRecipient, owner);
-        minter.registerDispatcher(address(gather), 10e18, 0);
-        minter.registerDispatcher(address(gather2), 10e18, 0);
-
-        // Override gather to token ID 42
-        minter.setDispatcherTokenId(address(gather), 42);
-
-        // Try to assign same token ID to gather2 - should revert
-        vm.expectRevert("NFTMinter: tokenId already assigned to another dispatcher");
-        minter.setDispatcherTokenId(address(gather2), 42);
-    }
-
-    function test_mint_usesOverriddenTokenIdWhenSet() public {
-        uint256 price = 10e18;
-        minter.registerDispatcher(address(gather), price, 0);
-        gather.setMinter(address(minter));
-
-        // Override to token ID 99
-        minter.setDispatcherTokenId(address(gather), 99);
-
-        // Give user tokens and approve
-        tokenA.mint(user, 100e18);
-        vm.prank(user);
-        tokenA.approve(address(minter), type(uint256).max);
-
-        // Mint
-        vm.prank(user);
-        minter.mint(address(tokenA), 1, recipient);
-
-        // NFT should be minted with overridden token ID 99, not default 1
-        assertEq(minter.balanceOf(recipient, 99), 1, "Recipient should have 1 NFT with overridden token ID 99");
-        assertEq(minter.balanceOf(recipient, 1), 0, "Recipient should have 0 NFTs with default token ID 1");
-    }
-
     function test_uri_returnsDispatcherMetadata() public {
         minter.registerDispatcher(address(gather), 10e18, 0);
         gather.setMetadata("Test NFT", "https://example.com/nft.png", "A test NFT");
@@ -1044,12 +991,97 @@ contract NFTMinterTest is Test {
         assertEq(result, "", "uri should return empty string for unmapped token ID");
     }
 
-    function test_setDispatcherTokenId_onlyOwner() public {
+    // =========================================================================
+    // Dispatcher Disabled Flag tests
+    // =========================================================================
+
+    function test_setDispatcherDisabled_preventsMinting() public {
+        // Register and authorize
+        uint256 price = 10e18;
+        minter.registerDispatcher(address(gather), price, 0);
+        gather.setMinter(address(minter));
+
+        // Give user tokens and approve
+        tokenA.mint(user, 100e18);
+        vm.prank(user);
+        tokenA.approve(address(minter), type(uint256).max);
+
+        // Mint succeeds before disabling
+        vm.prank(user);
+        minter.mint(address(tokenA), 1, recipient);
+        assertEq(minter.balanceOf(recipient, 1), 1);
+
+        // Disable the dispatcher
+        minter.setDispatcherDisabled(1, true);
+
+        // Mint should revert
+        vm.prank(user);
+        vm.expectRevert("NFTMinter: dispatcher is disabled");
+        minter.mint(address(tokenA), 1, recipient);
+    }
+
+    function test_setDispatcherDisabled_canReEnable() public {
+        // Register and authorize
+        uint256 price = 10e18;
+        minter.registerDispatcher(address(gather), price, 0);
+        gather.setMinter(address(minter));
+
+        // Give user tokens and approve
+        tokenA.mint(user, 100e18);
+        vm.prank(user);
+        tokenA.approve(address(minter), type(uint256).max);
+
+        // Disable
+        minter.setDispatcherDisabled(1, true);
+
+        // Mint reverts
+        vm.prank(user);
+        vm.expectRevert("NFTMinter: dispatcher is disabled");
+        minter.mint(address(tokenA), 1, recipient);
+
+        // Re-enable
+        minter.setDispatcherDisabled(1, false);
+
+        // Mint succeeds again
+        vm.prank(user);
+        minter.mint(address(tokenA), 1, recipient);
+        assertEq(minter.balanceOf(recipient, 1), 1);
+    }
+
+    function test_setDispatcherDisabled_existingNFTsUnaffected() public {
+        // Register and authorize
+        uint256 price = 10e18;
+        minter.registerDispatcher(address(gather), price, 0);
+        gather.setMinter(address(minter));
+
+        // Give user tokens and approve
+        tokenA.mint(user, 100e18);
+        vm.prank(user);
+        tokenA.approve(address(minter), type(uint256).max);
+
+        // Mint an NFT
+        vm.prank(user);
+        minter.mint(address(tokenA), 1, recipient);
+        assertEq(minter.balanceOf(recipient, 1), 1);
+
+        // Disable the dispatcher
+        minter.setDispatcherDisabled(1, true);
+
+        // Existing NFT balance is unchanged
+        assertEq(minter.balanceOf(recipient, 1), 1);
+    }
+
+    function test_setDispatcherDisabled_onlyOwner() public {
         minter.registerDispatcher(address(gather), 10e18, 0);
 
         vm.prank(user);
         vm.expectRevert();
-        minter.setDispatcherTokenId(address(gather), 42);
+        minter.setDispatcherDisabled(1, true);
+    }
+
+    function test_setDispatcherDisabled_revertsForUnregistered() public {
+        vm.expectRevert("NFTMinter: index not registered");
+        minter.setDispatcherDisabled(999, true);
     }
 
     // =========================================================================
