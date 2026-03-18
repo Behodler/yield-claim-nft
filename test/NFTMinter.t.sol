@@ -1181,4 +1181,122 @@ contract NFTMinterTest is Test {
 
         minter.setAuthorizedBurner(authorizedBurnerAddr, true);
     }
+
+    // =========================================================================
+    // ERC1155Supply tests (totalSupply, exists)
+    // =========================================================================
+
+    function test_totalSupply_increasesByMintedAmount() public {
+        // Register gather dispatcher and authorize
+        minter.registerDispatcher(address(gather), 10e18, 0);
+        gather.setMinter(address(minter));
+
+        // Give user tokens and approve
+        tokenA.mint(user, 100e18);
+        vm.prank(user);
+        tokenA.approve(address(minter), type(uint256).max);
+
+        // Before mint, totalSupply for token ID 1 should be 0
+        assertEq(minter.totalSupply(1), 0, "totalSupply should be 0 before any mints");
+
+        // Mint 1 NFT
+        vm.prank(user);
+        minter.mint(address(tokenA), 1, recipient);
+        assertEq(minter.totalSupply(1), 1, "totalSupply should be 1 after first mint");
+
+        // Mint another NFT (same token ID)
+        vm.prank(user);
+        minter.mint(address(tokenA), 1, recipient);
+        assertEq(minter.totalSupply(1), 2, "totalSupply should be 2 after second mint");
+    }
+
+    function test_totalSupply_decreasesByBurnedAmount() public {
+        // Mint 3 NFTs to user
+        minter.registerDispatcher(address(gather), 10e18, 0);
+        gather.setMinter(address(minter));
+
+        tokenA.mint(user, 100e18);
+        vm.prank(user);
+        tokenA.approve(address(minter), type(uint256).max);
+
+        vm.prank(user);
+        minter.mint(address(tokenA), 1, user);
+        vm.prank(user);
+        minter.mint(address(tokenA), 1, user);
+        vm.prank(user);
+        minter.mint(address(tokenA), 1, user);
+        assertEq(minter.totalSupply(1), 3, "totalSupply should be 3 after 3 mints");
+
+        // Authorize burner and burn 2
+        minter.setAuthorizedBurner(authorizedBurnerAddr, true);
+        vm.prank(authorizedBurnerAddr);
+        minter.burn(user, 1, 2);
+        assertEq(minter.totalSupply(1), 1, "totalSupply should be 1 after burning 2");
+
+        // Burn remaining 1
+        vm.prank(authorizedBurnerAddr);
+        minter.burn(user, 1, 1);
+        assertEq(minter.totalSupply(1), 0, "totalSupply should be 0 after burning all");
+    }
+
+    function test_totalSupply_noArgs_returnsTotalAcrossAllTokenIds() public {
+        // Register two dispatchers (token IDs 1 and 2)
+        Gather gather2 = new Gather(address(tokenA), gatherRecipient, owner);
+        gather2.setMinter(address(minter));
+
+        minter.registerDispatcher(address(gather), 10e18, 0);
+        gather.setMinter(address(minter));
+        minter.registerDispatcher(address(gather2), 10e18, 0);
+
+        tokenA.mint(user, 200e18);
+        vm.prank(user);
+        tokenA.approve(address(minter), type(uint256).max);
+
+        // Before any mints
+        assertEq(minter.totalSupply(), 0, "global totalSupply should be 0 initially");
+
+        // Mint 2 of token ID 1
+        vm.prank(user);
+        minter.mint(address(tokenA), 1, recipient);
+        vm.prank(user);
+        minter.mint(address(tokenA), 1, recipient);
+
+        // Mint 1 of token ID 2
+        vm.prank(user);
+        minter.mint(address(tokenA), 2, recipient);
+
+        // Global total should be 3
+        assertEq(minter.totalSupply(), 3, "global totalSupply should be 3 across both token IDs");
+
+        // Per-token-ID totals
+        assertEq(minter.totalSupply(1), 2, "totalSupply(1) should be 2");
+        assertEq(minter.totalSupply(2), 1, "totalSupply(2) should be 1");
+    }
+
+    function test_exists_returnsTrueAfterMintAndFalseAfterFullBurn() public {
+        minter.registerDispatcher(address(gather), 10e18, 0);
+        gather.setMinter(address(minter));
+
+        // Before mint: token ID 1 does not exist
+        assertFalse(minter.exists(1), "exists should be false before any mint");
+
+        // Give user tokens and mint
+        tokenA.mint(user, 100e18);
+        vm.prank(user);
+        tokenA.approve(address(minter), type(uint256).max);
+
+        vm.prank(user);
+        minter.mint(address(tokenA), 1, user);
+
+        // After mint: token ID 1 exists
+        assertTrue(minter.exists(1), "exists should be true after mint");
+
+        // Burn all
+        minter.setAuthorizedBurner(authorizedBurnerAddr, true);
+        vm.prank(authorizedBurnerAddr);
+        minter.burn(user, 1, 1);
+
+        // After full burn: token ID 1 no longer exists
+        assertFalse(minter.exists(1), "exists should be false after full burn");
+    }
 }
