@@ -41,8 +41,10 @@ contract MockBalancerVault {
     Settlement[] public settlements;
 
     function unlock(bytes calldata data) external returns (bytes memory result) {
-        // Call back to the sender (BalancerPooler) with the data
-        result = IUnlockCallback(msg.sender).unlockCallback(data);
+        // Raw low-level call back to the sender, matching real Balancer V3 vault behavior
+        (bool success, bytes memory returnData) = msg.sender.call(data);
+        require(success, "MockBalancerVault: unlock callback failed");
+        result = returnData;
     }
 
     function addLiquidity(AddLiquidityParams memory params)

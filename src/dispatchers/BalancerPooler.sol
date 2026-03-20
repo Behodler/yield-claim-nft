@@ -46,7 +46,8 @@ contract BalancerPooler is ATokenDispatcher, IUnlockCallback {
     /// @param extraData Optional ABI-encoded uint256 for minBptAmountOut slippage protection.
     function dispatch(address, uint256 amount, bytes calldata extraData) external override onlyMinter whenNotPaused {
         uint256 minBptAmountOut = extraData.length > 0 ? abi.decode(extraData, (uint256)) : 0;
-        bytes memory data = abi.encode(amount, minBptAmountOut);
+        bytes memory innerData = abi.encode(amount, minBptAmountOut);
+        bytes memory data = abi.encodeWithSelector(IUnlockCallback.unlockCallback.selector, innerData);
         IBalancerVault(_vault).unlock(data);
     }
 
