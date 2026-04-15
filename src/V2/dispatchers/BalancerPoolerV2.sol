@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ATokenDispatcherV2} from "./ATokenDispatcherV2.sol";
+import {ITokenDispatcherV2} from "../interfaces/ITokenDispatcherV2.sol";
 import {IBalancerVault} from "../../interfaces/balancer/IBalancerVault.sol";
 import {IUnlockCallback} from "../../interfaces/balancer/IUnlockCallback.sol";
 import {AddLiquidityParams, AddLiquidityKind} from "../../interfaces/balancer/BalancerTypes.sol";
@@ -26,6 +27,11 @@ contract BalancerPoolerV2 is ATokenDispatcherV2, IUnlockCallback {
         _pool = pool_;
         _vault = vault_;
         _primeTokenIsFirst = primeTokenIsFirst_;
+    }
+
+    /// @inheritdoc ITokenDispatcherV2
+    function primeToken() external view returns (address) {
+        return _primeToken;
     }
 
     /// @notice Returns the Balancer vault address.

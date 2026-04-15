@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ATokenDispatcherV2} from "./ATokenDispatcherV2.sol";
+import {ITokenDispatcherV2} from "../interfaces/ITokenDispatcherV2.sol";
 
 /// @title GatherV2
 /// @notice A V2 token dispatcher that forwards received tokens to a configurable recipient address.
@@ -23,6 +24,11 @@ contract GatherV2 is ATokenDispatcherV2 {
         require(recipient_ != address(0), "GatherV2: zero recipient address");
         _token = token_;
         _recipient = recipient_;
+    }
+
+    /// @inheritdoc ITokenDispatcherV2
+    function primeToken() external view returns (address) {
+        return _token;
     }
 
     /// @notice Returns the current recipient address where tokens are forwarded.

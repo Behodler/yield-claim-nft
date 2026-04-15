@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {ATokenDispatcherV2} from "./ATokenDispatcherV2.sol";
+import {ITokenDispatcherV2} from "../interfaces/ITokenDispatcherV2.sol";
 import {IBurnable} from "../../interfaces/IBurnable.sol";
 import {IBurnRecorder} from "../../interfaces/IBurnRecorder.sol";
 
@@ -16,6 +17,11 @@ contract BurnerV2 is ATokenDispatcherV2 {
     constructor(address token_, address burnRecorder_, address initialOwner) ATokenDispatcherV2(initialOwner) {
         _token = token_;
         _burnRecorder = IBurnRecorder(burnRecorder_);
+    }
+
+    /// @inheritdoc ITokenDispatcherV2
+    function primeToken() external view returns (address) {
+        return _token;
     }
 
     /// @notice Burns tokens already on this contract and records the burn.

@@ -180,7 +180,7 @@ contract GatherV2Test is Test {
 
         address nftRecipient = address(0xFACE);
         vm.prank(user);
-        bool success = nftMinter.mint(address(token), 1, nftRecipient);
+        bool success = nftMinter.mint(1, nftRecipient);
 
         assertTrue(success, "Mint should succeed");
         assertEq(token.balanceOf(user), 90e18, "User should have paid 10e18");

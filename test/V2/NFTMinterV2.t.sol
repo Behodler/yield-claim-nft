@@ -121,24 +121,22 @@ contract NFTMinterV2Test is Test {
     }
 
     // =========================================================================
-    // V2: No primeToken check — mint with any token
+    // primeToken invariant — mint always uses dispatcher's prime token (H-01 fix)
     // =========================================================================
 
-    function test_mint_worksWithAnyToken_noPrimeTokenCheck() public {
-        // Register gather (internally uses tokenA) but mint paying with tokenB
-        // V2 does not validate token against dispatcher, so this should work
-        // (the dispatch will fail if the dispatcher can't handle it, but NFTMinterV2 doesn't check)
+    function test_mint_usesDispatcherPrimeToken() public {
+        // Register gather (internally uses tokenA) — mint always uses tokenA from dispatcher
         uint256 price = 10e18;
         minter.registerDispatcher(address(gather), price, 0);
         gather.setMinter(address(minter));
 
-        // Give user tokenA and approve (using tokenA so dispatch works correctly)
+        // Give user tokenA and approve
         tokenA.mint(user, 100e18);
         vm.prank(user);
         tokenA.approve(address(minter), type(uint256).max);
 
         vm.prank(user);
-        bool success = minter.mint(address(tokenA), 1, recipient);
+        bool success = minter.mint(1, recipient);
 
         assertTrue(success);
         assertEq(tokenA.balanceOf(user), 90e18);
@@ -156,7 +154,7 @@ contract NFTMinterV2Test is Test {
         tokenA.approve(address(minter), type(uint256).max);
 
         vm.prank(user);
-        bool success = minter.mint(address(tokenA), 1, recipient);
+        bool success = minter.mint(1, recipient);
 
         assertTrue(success);
         assertEq(tokenA.balanceOf(user), 90e18);
@@ -167,7 +165,7 @@ contract NFTMinterV2Test is Test {
 
     function test_mint_revertsIfIndexNotRegistered() public {
         vm.expectRevert("NFTMinterV2: index not registered");
-        minter.mint(address(tokenA), 999, recipient);
+        minter.mint(999, recipient);
     }
 
     function test_mint_priceGrowsCorrectly() public {
@@ -183,13 +181,13 @@ contract NFTMinterV2Test is Test {
 
         // First mint at 10e18
         vm.prank(user);
-        minter.mint(address(tokenA), 1, recipient);
+        minter.mint(1, recipient);
         uint256 expectedPrice = initialPrice + (initialPrice * growthBps) / 10000;
         assertEq(minter.getPrice(1), expectedPrice);
 
         // Second mint at new price
         vm.prank(user);
-        minter.mint(address(tokenA), 1, recipient);
+        minter.mint(1, recipient);
         uint256 expectedPrice2 = expectedPrice + (expectedPrice * growthBps) / 10000;
         assertEq(minter.getPrice(1), expectedPrice2);
     }
@@ -207,7 +205,7 @@ contract NFTMinterV2Test is Test {
         burnableToken.approve(address(minter), type(uint256).max);
 
         vm.prank(user);
-        minter.mint(address(burnableToken), 1, recipient);
+        minter.mint(1, recipient);
 
         assertEq(burnableToken.balanceOf(address(burnableDispatcher)), 0);
         assertEq(burnableToken.balanceOf(address(minter)), 0);
@@ -225,7 +223,7 @@ contract NFTMinterV2Test is Test {
 
         for (uint256 i = 0; i < 3; i++) {
             vm.prank(user);
-            minter.mint(address(tokenA), 1, recipient);
+            minter.mint(1, recipient);
             assertEq(tokenA.balanceOf(address(minter)), 0, "Minter balance must be 0 after mint");
         }
     }
@@ -473,7 +471,7 @@ contract NFTMinterV2Test is Test {
         vm.prank(user);
         tokenA.approve(address(minter), type(uint256).max);
         vm.prank(user);
-        minter.mint(address(tokenA), 1, recipient);
+        minter.mint(1, recipient);
 
         uint256 priceAfterMint = minter.getPrice(1);
         assertTrue(priceAfterMint > initialPrice, "Price should have grown");
@@ -530,7 +528,7 @@ contract NFTMinterV2Test is Test {
         tokenA.approve(address(minter), type(uint256).max);
 
         vm.prank(user);
-        bool success = minter.mint(address(tokenA), 1, recipient);
+        bool success = minter.mint(1, recipient);
 
         assertTrue(success, "Mint should succeed with replaced dispatcher");
         assertEq(minter.balanceOf(recipient, 1), 1, "Recipient should have 1 NFT");
@@ -688,14 +686,14 @@ contract NFTMinterV2Test is Test {
         tokenA.approve(address(minter), type(uint256).max);
 
         vm.prank(user);
-        minter.mint(address(tokenA), 1, recipient);
+        minter.mint(1, recipient);
         assertEq(minter.balanceOf(recipient, 1), 1);
 
         minter.setDispatcherDisabled(1, true);
 
         vm.prank(user);
         vm.expectRevert("NFTMinterV2: dispatcher is disabled");
-        minter.mint(address(tokenA), 1, recipient);
+        minter.mint(1, recipient);
     }
 
     function test_setDispatcherDisabled_onlyOwner() public {
@@ -726,7 +724,7 @@ contract NFTMinterV2Test is Test {
         tokenA.approve(address(minter), type(uint256).max);
 
         vm.prank(holder);
-        minter.mint(address(tokenA), 1, holder);
+        minter.mint(1, holder);
 
         return 1;
     }
@@ -778,11 +776,11 @@ contract NFTMinterV2Test is Test {
         assertEq(minter.totalSupply(1), 0, "totalSupply should be 0 before any mints");
 
         vm.prank(user);
-        minter.mint(address(tokenA), 1, recipient);
+        minter.mint(1, recipient);
         assertEq(minter.totalSupply(1), 1, "totalSupply should be 1 after first mint");
 
         vm.prank(user);
-        minter.mint(address(tokenA), 1, recipient);
+        minter.mint(1, recipient);
         assertEq(minter.totalSupply(1), 2, "totalSupply should be 2 after second mint");
     }
 
@@ -797,7 +795,7 @@ contract NFTMinterV2Test is Test {
         tokenA.approve(address(minter), type(uint256).max);
 
         vm.prank(user);
-        minter.mint(address(tokenA), 1, user);
+        minter.mint(1, user);
 
         assertTrue(minter.exists(1), "exists should be true after mint");
 
@@ -832,7 +830,7 @@ contract NFTMinterV2Test is Test {
 
         vm.prank(user);
         vm.expectRevert("Contract is paused");
-        minter.mint(address(tokenA), 1, recipient);
+        minter.mint(1, recipient);
     }
 
     // =========================================================================
@@ -853,7 +851,7 @@ contract NFTMinterV2Test is Test {
         fotToken.approve(address(minter), type(uint256).max);
 
         vm.prank(user);
-        bool success = minter.mint(address(fotToken), 1, recipient);
+        bool success = minter.mint(1, recipient);
 
         assertTrue(success, "Mint should succeed with FOT token");
         assertEq(minter.balanceOf(recipient, 1), 1, "Recipient should have 1 claim NFT");
@@ -876,7 +874,7 @@ contract NFTMinterV2Test is Test {
 
         bytes memory extraData = abi.encode(uint256(42), uint256(100));
         vm.prank(user);
-        bool success = minter.mint(address(tokenA), 1, recipient, extraData);
+        bool success = minter.mint(1, recipient, extraData);
 
         assertTrue(success, "4-parameter mint should succeed");
         assertEq(tokenA.balanceOf(user), 90e18, "User should have paid 10e18");

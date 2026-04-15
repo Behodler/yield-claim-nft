@@ -5,6 +5,7 @@ import {ERC1155} from "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
 import {ERC1155Supply} from "@openzeppelin/contracts/token/ERC1155/extensions/ERC1155Supply.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 import {ITokenDispatcherV2} from "./interfaces/ITokenDispatcherV2.sol";
 import {ATokenDispatcherV2} from "./dispatchers/ATokenDispatcherV2.sol";
@@ -13,6 +14,8 @@ import {ITokenMinterV2} from "./interfaces/ITokenMinterV2.sol";
 import {IPausable} from "pauser/interfaces/IPausable.sol";
 
 contract NFTMinterV2 is ERC1155Supply, Ownable, INFTMinterV2, IPausable {
+    using SafeERC20 for IERC20;
+
     /// @notice Configuration for a registered dispatcher.
     struct DispatcherConfig {
         address dispatcher; // TokenDispatcher contract address
@@ -153,31 +156,31 @@ contract NFTMinterV2 is ERC1155Supply, Ownable, INFTMinterV2, IPausable {
     }
 
     /// @inheritdoc ITokenMinterV2
-    function mint(address token, uint256 index, address recipient) external returns (bool) {
-        return _executeMint(token, index, recipient, "");
+    function mint(uint256 index, address recipient) external returns (bool) {
+        return _executeMint(index, recipient, "");
     }
 
     /// @inheritdoc ITokenMinterV2
-    function mint(address token, uint256 index, address recipient, bytes calldata extraData) external returns (bool) {
-        return _executeMint(token, index, recipient, extraData);
+    function mint(uint256 index, address recipient, bytes calldata extraData) external returns (bool) {
+        return _executeMint(index, recipient, extraData);
     }
 
     /// @dev Shared internal implementation for both mint() overloads.
-    /// V2: No primeToken() validation — transfers whatever token the user specifies.
-    function _executeMint(address token, uint256 index, address recipient, bytes memory extraData)
-        internal
-        returns (bool)
-    {
+    /// Fetches the authoritative prime token from the dispatcher to prevent token spoofing (H-01 fix).
+    function _executeMint(uint256 index, address recipient, bytes memory extraData) internal returns (bool) {
         require(!paused, "Contract is paused");
         DispatcherConfig storage config = configs[index];
         require(config.dispatcher != address(0), "NFTMinterV2: index not registered");
         require(!config.disabled, "NFTMinterV2: dispatcher is disabled");
 
+        // Fetch the authoritative prime token from the dispatcher (H-01 fix: caller cannot specify token)
+        address token = ITokenDispatcherV2(config.dispatcher).primeToken();
+
         uint256 price = config.price;
 
         // Transfer tokens directly from user to dispatcher (balance-before/after for FOT safety)
         uint256 balanceBefore = IERC20(token).balanceOf(config.dispatcher);
-        IERC20(token).transferFrom(msg.sender, config.dispatcher, price);
+        IERC20(token).safeTransferFrom(msg.sender, config.dispatcher, price);
         uint256 actualReceived = IERC20(token).balanceOf(config.dispatcher) - balanceBefore;
 
         // Grow price: newPrice = oldPrice + (oldPrice * growthBasisPoints / 10000)
