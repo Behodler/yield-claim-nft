@@ -7,7 +7,7 @@ import {IUnlockCallback} from "../../src/interfaces/balancer/IUnlockCallback.sol
 import {AddLiquidityParams, AddLiquidityKind} from "../../src/interfaces/balancer/BalancerTypes.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {MockFOTToken} from "../mocks/MockFOTToken.sol";
+import {MockERC4626} from "../mocks/MockERC4626.sol";
 
 /// @dev Mock ERC20 with configurable decimals for testing.
 contract MockERC20 is ERC20 {
@@ -108,7 +108,8 @@ contract MockBalancerVault {
 
 contract BalancerPoolerV2Test is Test {
     BalancerPoolerV2 public pooler;
-    MockERC20 public primeToken;
+    MockERC20 public usds; // underlying prime token (USDS)
+    MockERC4626 public sUsds; // ERC4626 wrapper (sUSDS)
     MockBalancerVault public mockVault;
     MockERC20 public bptToken;
     address public owner = address(this);
@@ -116,11 +117,37 @@ contract BalancerPoolerV2Test is Test {
     address public nonOwner = address(0xCAFE);
 
     function setUp() public {
-        primeToken = new MockERC20("Prime Token", "PRM", 18);
+        usds = new MockERC20("USDS", "USDS", 18);
+        sUsds = new MockERC4626("Savings USDS", "sUSDS", address(usds), 10000); // 1:1 rate
         bptToken = new MockERC20("Balancer Pool Token", "BPT", 18);
         mockVault = new MockBalancerVault();
-        pooler = new BalancerPoolerV2(address(primeToken), address(bptToken), address(mockVault), true, owner);
+        pooler = new BalancerPoolerV2(address(sUsds), address(bptToken), address(mockVault), true, owner);
         pooler.setMinter(minter);
+    }
+
+    // =========================================================================
+    // constructor tests
+    // =========================================================================
+
+    function test_constructor_revertsWithZeroSUSDS() public {
+        vm.expectRevert("BalancerPoolerV2: zero sUSDS");
+        new BalancerPoolerV2(address(0), address(bptToken), address(mockVault), true, owner);
+    }
+
+    // =========================================================================
+    // primeToken() getter tests
+    // =========================================================================
+
+    function test_primeToken_returnsUSDSAddress() public view {
+        assertEq(pooler.primeToken(), address(usds), "primeToken() should return the USDS address");
+    }
+
+    // =========================================================================
+    // sUSDS() getter tests
+    // =========================================================================
+
+    function test_sUSDS_returnsConstructorSuppliedAddress() public view {
+        assertEq(pooler.sUSDS(), address(sUsds), "sUSDS() should return the constructor-supplied sUSDS address");
     }
 
     // =========================================================================
@@ -165,7 +192,7 @@ contract BalancerPoolerV2Test is Test {
 
         // Dispatch should use the new pool
         uint256 amount = 100e18;
-        primeToken.mint(address(pooler), amount);
+        usds.mint(address(pooler), amount);
 
         vm.prank(minter);
         pooler.dispatch(minter, amount, "");
@@ -178,12 +205,12 @@ contract BalancerPoolerV2Test is Test {
     }
 
     // =========================================================================
-    // dispatch tests
+    // dispatch tests — USDS wrap to sUSDS flow
     // =========================================================================
 
-    function test_dispatch_alwaysDonates() public {
+    function test_dispatch_wrapsUSDSToSUSDSAndCallsAddLiquidity() public {
         uint256 amount = 1e18;
-        primeToken.mint(address(pooler), amount);
+        usds.mint(address(pooler), amount);
 
         vm.prank(minter);
         pooler.dispatch(minter, amount, "");
@@ -193,56 +220,57 @@ contract BalancerPoolerV2Test is Test {
 
     function test_dispatch_revertsWhenCalledByNonMinter() public {
         uint256 amount = 100e18;
-        primeToken.mint(address(pooler), amount);
+        usds.mint(address(pooler), amount);
 
         vm.prank(nonOwner);
         vm.expectRevert("ATokenDispatcherV2: caller is not minter");
         pooler.dispatch(nonOwner, amount, "");
     }
 
-    function test_dispatch_singleSidedJoin() public {
+    function test_dispatch_singleSidedJoin_sUSDSAmount() public {
         uint256 amount = 100e18;
-        primeToken.mint(address(pooler), amount);
+        usds.mint(address(pooler), amount);
 
         vm.prank(minter);
         pooler.dispatch(minter, amount, "");
 
+        // With 1:1 rate, sUSDS shares == USDS amount
         uint256[] memory amounts = mockVault.getLastParamsMaxAmountsIn();
-        assertEq(amounts[0], amount, "Prime amount should be 100e18");
+        assertEq(amounts[0], amount, "sUSDS amount should be 100e18 at 1:1 rate");
         assertEq(amounts[1], 0, "Second slot should be 0 for single-sided join");
     }
 
-    function test_dispatch_primeTokenIsFirst_correctOrdering() public {
+    function test_dispatch_sUSDSIsFirst_correctOrdering() public {
         uint256 amount = 75e18;
-        primeToken.mint(address(pooler), amount);
+        usds.mint(address(pooler), amount);
 
         vm.prank(minter);
         pooler.dispatch(minter, amount, "");
 
         uint256[] memory amounts = mockVault.getLastParamsMaxAmountsIn();
-        assertEq(amounts[0], amount, "maxAmountsIn[0] should be primeAmount when primeTokenIsFirst=true");
-        assertEq(amounts[1], 0, "maxAmountsIn[1] should be 0 when primeTokenIsFirst=true");
+        assertEq(amounts[0], amount, "maxAmountsIn[0] should be sUSDS shares when sUSDSIsFirst=true");
+        assertEq(amounts[1], 0, "maxAmountsIn[1] should be 0 when sUSDSIsFirst=true");
     }
 
-    function test_dispatch_primeTokenIsSecond_correctOrdering() public {
+    function test_dispatch_sUSDSIsSecond_correctOrdering() public {
         BalancerPoolerV2 poolerReversed =
-            new BalancerPoolerV2(address(primeToken), address(bptToken), address(mockVault), false, owner);
+            new BalancerPoolerV2(address(sUsds), address(bptToken), address(mockVault), false, owner);
         poolerReversed.setMinter(minter);
 
         uint256 amount = 60e18;
-        primeToken.mint(address(poolerReversed), amount);
+        usds.mint(address(poolerReversed), amount);
 
         vm.prank(minter);
         poolerReversed.dispatch(minter, amount, "");
 
         uint256[] memory amounts = mockVault.getLastParamsMaxAmountsIn();
-        assertEq(amounts[0], 0, "maxAmountsIn[0] should be 0 when primeTokenIsFirst=false");
-        assertEq(amounts[1], amount, "maxAmountsIn[1] should be primeAmount when primeTokenIsFirst=false");
+        assertEq(amounts[0], 0, "maxAmountsIn[0] should be 0 when sUSDSIsFirst=false");
+        assertEq(amounts[1], amount, "maxAmountsIn[1] should be sUSDS shares when sUSDSIsFirst=false");
     }
 
     function test_dispatch_addsUnbalancedLiquidityViaVault() public {
         uint256 amount = 100e18;
-        primeToken.mint(address(pooler), amount);
+        usds.mint(address(pooler), amount);
 
         vm.prank(minter);
         pooler.dispatch(minter, amount, "");
@@ -268,12 +296,12 @@ contract BalancerPoolerV2Test is Test {
     }
 
     // =========================================================================
-    // settlement tests
+    // settlement tests — sUSDS is settled, not USDS
     // =========================================================================
 
-    function test_dispatch_settlementAmountsMatchVaultReceipts() public {
+    function test_dispatch_settlementTokenIsSUSDS() public {
         uint256 amount = 100e18;
-        primeToken.mint(address(pooler), amount);
+        usds.mint(address(pooler), amount);
 
         vm.prank(minter);
         pooler.dispatch(minter, amount, "");
@@ -282,74 +310,56 @@ contract BalancerPoolerV2Test is Test {
         assertEq(settlementsCount, 1, "Should have 1 settlement");
 
         (address settledToken0, uint256 settledAmount0) = mockVault.getSettlement(0);
-        assertEq(settledToken0, address(primeToken), "Settlement should be primeToken");
-        assertEq(settledAmount0, amount, "Settlement amount should match transferred amount");
+        assertEq(settledToken0, address(sUsds), "Settlement token should be sUSDS, not USDS");
+        assertEq(settledAmount0, amount, "Settlement amount should match sUSDS shares (1:1 rate)");
     }
 
     // =========================================================================
-    // FOT token dispatch tests
+    // Non-1:1 exchange rate tests
     // =========================================================================
 
-    function test_dispatch_FOTToken_noRevert_singleSidedJoin() public {
-        MockFOTToken fotToken = new MockFOTToken("FOT Token", "FOT", 200);
-        MockBalancerVault vault2 = new MockBalancerVault();
+    function test_dispatch_nonOneToOneRate_usesExactSharesFromDeposit() public {
+        // Set sUSDS rate to 5000 bps = 0.5 shares per asset (sUSDS is worth more than USDS)
+        sUsds.setRate(5000);
 
-        BalancerPoolerV2 fotPooler =
-            new BalancerPoolerV2(address(fotToken), address(bptToken), address(vault2), true, owner);
-        fotPooler.setMinter(minter);
-
-        uint256 amount = 100e18;
-        fotToken.mint(address(fotPooler), amount);
+        uint256 usdsAmount = 100e18;
+        usds.mint(address(pooler), usdsAmount);
 
         vm.prank(minter);
-        fotPooler.dispatch(minter, amount, "");
+        pooler.dispatch(minter, usdsAmount, "");
 
-        assertTrue(vault2.addLiquidityCalled(), "addLiquidity should have been called");
+        // At 5000 bps rate, 100e18 USDS -> 50e18 sUSDS shares
+        uint256 expectedShares = 50e18;
+
+        uint256[] memory amounts = mockVault.getLastParamsMaxAmountsIn();
+        assertEq(amounts[0], expectedShares, "maxAmountsIn should use exact sUSDS shares from deposit, not USDS amount");
+        assertEq(amounts[1], 0, "Second slot should be 0");
+
+        // Settlement should also use sUSDS shares amount
+        (address settledToken, uint256 settledAmount) = mockVault.getSettlement(0);
+        assertEq(settledToken, address(sUsds), "Settlement token should be sUSDS");
+        assertEq(settledAmount, expectedShares, "Settlement amount should be sUSDS shares, not USDS amount");
     }
 
-    function test_dispatch_FOTToken_settlementAmountsMatchActualVaultReceipts() public {
-        MockFOTToken fotToken = new MockFOTToken("FOT Token", "FOT", 200);
-        MockBalancerVault vault2 = new MockBalancerVault();
+    function test_dispatch_nonOneToOneRate_balancerVaultReceivesSUSDS() public {
+        // 2:1 rate — 2 shares per asset
+        sUsds.setRate(20000);
 
-        BalancerPoolerV2 fotPooler =
-            new BalancerPoolerV2(address(fotToken), address(bptToken), address(vault2), true, owner);
-        fotPooler.setMinter(minter);
-
-        uint256 amount = 100e18;
-        fotToken.mint(address(fotPooler), amount);
+        uint256 usdsAmount = 50e18;
+        usds.mint(address(pooler), usdsAmount);
 
         vm.prank(minter);
-        fotPooler.dispatch(minter, amount, "");
+        pooler.dispatch(minter, usdsAmount, "");
 
-        uint256 expectedPrimeInVault = 98e18;
+        uint256 expectedShares = 100e18; // 50e18 * 20000 / 10000
 
-        uint256 settlementsCount = vault2.getSettlementsCount();
-        assertEq(settlementsCount, 1, "Should have 1 settlement");
+        // sUSDS was transferred to mock vault
+        uint256 vaultSUsdsBalance = sUsds.balanceOf(address(mockVault));
+        assertEq(vaultSUsdsBalance, expectedShares, "Balancer vault should have received sUSDS shares");
 
-        (address settledToken0, uint256 settledAmount0) = vault2.getSettlement(0);
-        assertEq(settledToken0, address(fotToken), "Settlement should be FOT primeToken");
-        assertEq(settledAmount0, expectedPrimeInVault, "Settlement should match actual vault receipt after FOT fee");
-
-        uint256[] memory amounts = vault2.getLastParamsMaxAmountsIn();
-        assertEq(amounts[0], expectedPrimeInVault, "maxAmountsIn[0] should be actualPrimeInVault");
-        assertEq(amounts[1], 0, "maxAmountsIn[1] should be 0");
-    }
-
-    function test_dispatch_FOTToken_noStuckTokensInPooler() public {
-        MockFOTToken fotToken = new MockFOTToken("FOT Token", "FOT", 500);
-        MockBalancerVault vault2 = new MockBalancerVault();
-
-        BalancerPoolerV2 fotPooler =
-            new BalancerPoolerV2(address(fotToken), address(bptToken), address(vault2), true, owner);
-        fotPooler.setMinter(minter);
-
-        uint256 amount = 100e18;
-        fotToken.mint(address(fotPooler), amount);
-
-        vm.prank(minter);
-        fotPooler.dispatch(minter, amount, "");
-
-        assertEq(fotToken.balanceOf(address(fotPooler)), 0, "No FOT tokens should be stuck in pooler");
+        // USDS should NOT be in the vault
+        uint256 vaultUsdsBalance = usds.balanceOf(address(mockVault));
+        assertEq(vaultUsdsBalance, 0, "Balancer vault should NOT have received USDS");
     }
 
     // =========================================================================
@@ -358,7 +368,7 @@ contract BalancerPoolerV2Test is Test {
 
     function test_dispatch_withExtraData_setsMinBptAmountOut() public {
         uint256 amount = 100e18;
-        primeToken.mint(address(pooler), amount);
+        usds.mint(address(pooler), amount);
 
         uint256 minBpt = 80e18;
         bytes memory extraData = abi.encode(minBpt);
@@ -371,7 +381,7 @@ contract BalancerPoolerV2Test is Test {
 
     function test_dispatch_withEmptyExtraData_defaultsMinBptToZero() public {
         uint256 amount = 100e18;
-        primeToken.mint(address(pooler), amount);
+        usds.mint(address(pooler), amount);
 
         vm.prank(minter);
         pooler.dispatch(minter, amount, "");
@@ -385,7 +395,7 @@ contract BalancerPoolerV2Test is Test {
 
     function test_dispatch_bptTokensHeldByDispatcher() public {
         uint256 amount = 100e18;
-        primeToken.mint(address(pooler), amount);
+        usds.mint(address(pooler), amount);
 
         assertEq(bptToken.balanceOf(address(pooler)), 0, "Pooler should have 0 BPT before dispatch");
 
@@ -399,12 +409,12 @@ contract BalancerPoolerV2Test is Test {
         uint256 amount1 = 50e18;
         uint256 amount2 = 75e18;
 
-        primeToken.mint(address(pooler), amount1);
+        usds.mint(address(pooler), amount1);
         vm.prank(minter);
         pooler.dispatch(minter, amount1, "");
         assertEq(bptToken.balanceOf(address(pooler)), 50e18, "BPT after first dispatch");
 
-        primeToken.mint(address(pooler), amount2);
+        usds.mint(address(pooler), amount2);
         vm.prank(minter);
         pooler.dispatch(minter, amount2, "");
         assertEq(bptToken.balanceOf(address(pooler)), 125e18, "BPT should accumulate across multiple dispatches");
@@ -416,7 +426,7 @@ contract BalancerPoolerV2Test is Test {
 
     function test_withdrawBPT_transfersBptToRecipient() public {
         uint256 amount = 100e18;
-        primeToken.mint(address(pooler), amount);
+        usds.mint(address(pooler), amount);
 
         vm.prank(minter);
         pooler.dispatch(minter, amount, "");
@@ -433,7 +443,7 @@ contract BalancerPoolerV2Test is Test {
 
     function test_withdrawBPT_revertsWhenCalledByNonOwner() public {
         uint256 amount = 100e18;
-        primeToken.mint(address(pooler), amount);
+        usds.mint(address(pooler), amount);
 
         vm.prank(minter);
         pooler.dispatch(minter, amount, "");
@@ -441,5 +451,35 @@ contract BalancerPoolerV2Test is Test {
         vm.prank(nonOwner);
         vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
         pooler.withdrawBPT(nonOwner, 1e18);
+    }
+
+    // =========================================================================
+    // USDS stays out of Balancer vault — only sUSDS enters
+    // =========================================================================
+
+    function test_dispatch_noUSDSInBalancerVault() public {
+        uint256 amount = 100e18;
+        usds.mint(address(pooler), amount);
+
+        vm.prank(minter);
+        pooler.dispatch(minter, amount, "");
+
+        assertEq(usds.balanceOf(address(mockVault)), 0, "USDS should NOT be sent to Balancer vault");
+        assertEq(sUsds.balanceOf(address(mockVault)), amount, "sUSDS should be in Balancer vault");
+    }
+
+    // =========================================================================
+    // No stuck tokens in pooler after dispatch
+    // =========================================================================
+
+    function test_dispatch_noStuckUSDSInPooler() public {
+        uint256 amount = 100e18;
+        usds.mint(address(pooler), amount);
+
+        vm.prank(minter);
+        pooler.dispatch(minter, amount, "");
+
+        assertEq(usds.balanceOf(address(pooler)), 0, "No USDS should be stuck in pooler");
+        assertEq(sUsds.balanceOf(address(pooler)), 0, "No sUSDS should be stuck in pooler");
     }
 }
