@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ATokenDispatcher} from "./ATokenDispatcher.sol";
 import {ITokenDispatcher} from "../interfaces/ITokenDispatcher.sol";
 import {IBalancerVault} from "../interfaces/balancer/IBalancerVault.sol";
@@ -13,6 +14,8 @@ import {AddLiquidityParams, AddLiquidityKind} from "../interfaces/balancer/Balan
 ///         receiving BPT in return.
 /// @dev Implements IUnlockCallback to interact with the Balancer V3 vault's unlock pattern.
 contract BalancerPooler is ATokenDispatcher, IUnlockCallback {
+    using SafeERC20 for IERC20;
+
     address private immutable _primeToken;
     address private immutable _pool;
     address private immutable _vault;
@@ -59,7 +62,7 @@ contract BalancerPooler is ATokenDispatcher, IUnlockCallback {
 
         // Transfer primeToken to vault (balance-before/after for FOT safety)
         uint256 vaultPrimeBefore = IERC20(_primeToken).balanceOf(_vault);
-        IERC20(_primeToken).transfer(_vault, primeAmount);
+        IERC20(_primeToken).safeTransfer(_vault, primeAmount);
         uint256 actualPrimeInVault = IERC20(_primeToken).balanceOf(_vault) - vaultPrimeBefore;
 
         // Single-sided join: only primeToken, phUSD amount is 0
@@ -91,6 +94,6 @@ contract BalancerPooler is ATokenDispatcher, IUnlockCallback {
     /// @param recipient The address to receive the BPT tokens.
     /// @param amount The amount of BPT tokens to withdraw.
     function withdrawBPT(address recipient, uint256 amount) external onlyOwner {
-        IERC20(_pool).transfer(recipient, amount);
+        IERC20(_pool).safeTransfer(recipient, amount);
     }
 }

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ATokenDispatcherV2} from "./ATokenDispatcherV2.sol";
 import {ITokenDispatcherV2} from "../interfaces/ITokenDispatcherV2.sol";
 
@@ -11,6 +12,8 @@ import {ITokenDispatcherV2} from "../interfaces/ITokenDispatcherV2.sol";
 ///      The recipient address is updatable by the owner.
 ///      V2 removes primeToken() from the public interface.
 contract GatherV2 is ATokenDispatcherV2 {
+    using SafeERC20 for IERC20;
+
     address internal immutable _token;
     address private _recipient;
 
@@ -57,6 +60,6 @@ contract GatherV2 is ATokenDispatcherV2 {
         onlyMinter
         whenNotPaused
     {
-        IERC20(_token).transfer(_recipient, amount);
+        IERC20(_token).safeTransfer(_recipient, amount);
     }
 }

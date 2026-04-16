@@ -5,6 +5,7 @@ import {ERC1155} from "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
 import {ERC1155Supply} from "@openzeppelin/contracts/token/ERC1155/extensions/ERC1155Supply.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 import {ITokenDispatcher} from "./interfaces/ITokenDispatcher.sol";
 import {ATokenDispatcher} from "./dispatchers/ATokenDispatcher.sol";
@@ -13,6 +14,8 @@ import {ITokenMinter} from "./interfaces/ITokenMinter.sol";
 import {IPausable} from "pauser/interfaces/IPausable.sol";
 
 contract NFTMinter is ERC1155Supply, Ownable, INFTMinter, IPausable {
+    using SafeERC20 for IERC20;
+
     /// @notice Configuration for a registered dispatcher.
     struct DispatcherConfig {
         address dispatcher; // TokenDispatcher contract address
@@ -178,7 +181,7 @@ contract NFTMinter is ERC1155Supply, Ownable, INFTMinter, IPausable {
 
         // Transfer tokens directly from user to dispatcher (balance-before/after for FOT safety)
         uint256 balanceBefore = IERC20(token).balanceOf(config.dispatcher);
-        IERC20(token).transferFrom(msg.sender, config.dispatcher, price);
+        IERC20(token).safeTransferFrom(msg.sender, config.dispatcher, price);
         uint256 actualReceived = IERC20(token).balanceOf(config.dispatcher) - balanceBefore;
 
         // Grow price: newPrice = oldPrice + (oldPrice * growthBasisPoints / 10000)
@@ -256,7 +259,7 @@ contract NFTMinter is ERC1155Supply, Ownable, INFTMinter, IPausable {
     function emergencyWithdraw(address token) external onlyOwner {
         uint256 balance = IERC20(token).balanceOf(address(this));
         require(balance > 0, "NFTMinter: no tokens to withdraw");
-        IERC20(token).transfer(msg.sender, balance);
+        IERC20(token).safeTransfer(msg.sender, balance);
         emit EmergencyWithdraw(token, msg.sender, balance);
     }
 

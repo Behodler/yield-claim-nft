@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {ATokenDispatcherV2} from "./ATokenDispatcherV2.sol";
 import {ITokenDispatcherV2} from "../interfaces/ITokenDispatcherV2.sol";
@@ -17,6 +18,8 @@ import {AddLiquidityParams, AddLiquidityKind} from "../../interfaces/balancer/Ba
 ///      H-02 fix: dispatch only wraps USDS -> sUSDS. Pooling is a separate owner-triggered action
 ///      via pool(uint256 minBPT) callable by authorized poolers.
 contract BalancerPoolerV2 is ATokenDispatcherV2, IUnlockCallback {
+    using SafeERC20 for IERC20;
+
     address internal immutable _sUSDS;
     address internal immutable _primeToken;
     address private _pool;
@@ -111,7 +114,7 @@ contract BalancerPoolerV2 is ATokenDispatcherV2, IUnlockCallback {
         onlyMinter
         whenNotPaused
     {
-        IERC20(_primeToken).approve(_sUSDS, amount);
+        IERC20(_primeToken).forceApprove(_sUSDS, amount);
         IERC4626(_sUSDS).deposit(amount, address(this));
     }
 
@@ -133,7 +136,7 @@ contract BalancerPoolerV2 is ATokenDispatcherV2, IUnlockCallback {
 
         // 1. Transfer sUSDS to Balancer vault (balance-before/after for safety)
         uint256 vaultBefore = IERC20(_sUSDS).balanceOf(_vault);
-        IERC20(_sUSDS).transfer(_vault, sUSDSAmount);
+        IERC20(_sUSDS).safeTransfer(_vault, sUSDSAmount);
         uint256 actualInVault = IERC20(_sUSDS).balanceOf(_vault) - vaultBefore;
 
         // 2. Single-sided add of sUSDS to the sUSDS/phUSD pool
@@ -187,7 +190,7 @@ contract BalancerPoolerV2 is ATokenDispatcherV2, IUnlockCallback {
     /// @param recipient The address to receive the BPT tokens.
     /// @param amount The amount of BPT tokens to withdraw.
     function withdrawBPT(address recipient, uint256 amount) external onlyOwner {
-        IERC20(_pool).transfer(recipient, amount);
+        IERC20(_pool).safeTransfer(recipient, amount);
     }
 
     /// @notice Owner escape hatch. Transfers `amount` of any ERC20 token held by
@@ -201,6 +204,6 @@ contract BalancerPoolerV2 is ATokenDispatcherV2, IUnlockCallback {
     /// @param  amount Amount of `token` to transfer.
     function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
         require(to != address(0), "BalancerPoolerV2: zero recipient");
-        IERC20(token).transfer(to, amount);
+        IERC20(token).safeTransfer(to, amount);
     }
 }

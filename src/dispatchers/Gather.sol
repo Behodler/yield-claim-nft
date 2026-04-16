@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ATokenDispatcher} from "./ATokenDispatcher.sol";
 import {ITokenDispatcher} from "../interfaces/ITokenDispatcher.sol";
 
@@ -10,6 +11,8 @@ import {ITokenDispatcher} from "../interfaces/ITokenDispatcher.sol";
 /// @dev Tokens arrive directly on this contract via the minter's transferFrom.
 ///      The recipient address is updatable by the owner.
 contract Gather is ATokenDispatcher {
+    using SafeERC20 for IERC20;
+
     address private immutable _token;
     address private _recipient;
 
@@ -58,6 +61,6 @@ contract Gather is ATokenDispatcher {
         onlyMinter
         whenNotPaused
     {
-        IERC20(_token).transfer(_recipient, amount);
+        IERC20(_token).safeTransfer(_recipient, amount);
     }
 }

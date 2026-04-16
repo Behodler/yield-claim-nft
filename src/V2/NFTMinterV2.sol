@@ -299,7 +299,7 @@ contract NFTMinterV2 is ERC1155Supply, Ownable, INFTMinterV2, IPausable {
     function emergencyWithdraw(address token) external onlyOwner {
         uint256 balance = IERC20(token).balanceOf(address(this));
         require(balance > 0, "NFTMinterV2: no tokens to withdraw");
-        IERC20(token).transfer(msg.sender, balance);
+        IERC20(token).safeTransfer(msg.sender, balance);
         emit EmergencyWithdraw(token, msg.sender, balance);
     }
 
