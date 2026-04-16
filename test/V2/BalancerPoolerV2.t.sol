@@ -764,4 +764,114 @@ contract BalancerPoolerV2Test is Test {
         vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
         pooler.withdrawBPT(nonOwner, 1e18);
     }
+
+    // =========================================================================
+    // rescueERC20 tests
+    // =========================================================================
+
+    function test_rescueERC20_transfersArbitraryToken() public {
+        // Deploy a scratch token unrelated to the pooler's normal tokens
+        MockERC20 strayToken = new MockERC20("Stray", "STRAY", 18);
+        uint256 amount = 50e18;
+        strayToken.mint(address(pooler), amount);
+
+        address recipient = address(0xBBBB);
+        pooler.rescueERC20(address(strayToken), recipient, amount);
+
+        assertEq(strayToken.balanceOf(recipient), amount, "Recipient should receive rescued tokens");
+        assertEq(strayToken.balanceOf(address(pooler)), 0, "Pooler should have 0 after rescue");
+    }
+
+    function test_rescueERC20_worksForSUsds() public {
+        // Dispatch wraps USDS -> sUSDS, leaving sUSDS on the pooler
+        uint256 amount = 100e18;
+        usds.mint(address(pooler), amount);
+
+        vm.prank(minter);
+        pooler.dispatch(minter, amount, "");
+
+        uint256 sUsdsBalance = sUsds.balanceOf(address(pooler));
+        assertTrue(sUsdsBalance > 0, "Pooler should hold sUSDS after dispatch");
+
+        address recipient = address(0xCCCC);
+        pooler.rescueERC20(address(sUsds), recipient, sUsdsBalance);
+
+        assertEq(sUsds.balanceOf(recipient), sUsdsBalance, "Recipient should receive all sUSDS");
+        assertEq(sUsds.balanceOf(address(pooler)), 0, "Pooler sUSDS should be drained");
+    }
+
+    function test_rescueERC20_worksForBpt() public {
+        // Pool to get BPT on the pooler, then rescue it
+        uint256 amount = 100e18;
+        usds.mint(address(pooler), amount);
+
+        vm.prank(minter);
+        pooler.dispatch(minter, amount, "");
+
+        vm.prank(authorizedPooler);
+        pooler.pool(0);
+
+        uint256 poolerBpt = bptToken.balanceOf(address(pooler));
+        assertTrue(poolerBpt > 0, "Pooler should have BPT after pooling");
+
+        address recipient = address(0xDDDD);
+        pooler.rescueERC20(address(bptToken), recipient, poolerBpt);
+
+        assertEq(bptToken.balanceOf(recipient), poolerBpt, "Recipient should receive all BPT");
+        assertEq(bptToken.balanceOf(address(pooler)), 0, "Pooler BPT should be 0 after rescue");
+    }
+
+    function test_rescueERC20_revertsWhenCalledByNonOwner() public {
+        MockERC20 strayToken = new MockERC20("Stray", "STRAY", 18);
+        strayToken.mint(address(pooler), 10e18);
+
+        vm.prank(nonOwner);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
+        pooler.rescueERC20(address(strayToken), nonOwner, 10e18);
+    }
+
+    function test_rescueERC20_revertsWhenRecipientIsZero() public {
+        MockERC20 strayToken = new MockERC20("Stray", "STRAY", 18);
+        strayToken.mint(address(pooler), 10e18);
+
+        vm.expectRevert("BalancerPoolerV2: zero recipient");
+        pooler.rescueERC20(address(strayToken), address(0), 10e18);
+    }
+
+    function test_rescueERC20_worksWhilePaused() public {
+        MockERC20 strayToken = new MockERC20("Stray", "STRAY", 18);
+        uint256 amount = 25e18;
+        strayToken.mint(address(pooler), amount);
+
+        // Pause the dispatcher (pause is called by minter)
+        vm.prank(minter);
+        pooler.pause();
+
+        // rescueERC20 should still work — escape hatch, not pause-gated
+        address recipient = address(0xEEEE);
+        pooler.rescueERC20(address(strayToken), recipient, amount);
+
+        assertEq(strayToken.balanceOf(recipient), amount, "Rescue should work while paused");
+    }
+
+    function test_rescueERC20_zeroAmountIsNoop() public {
+        MockERC20 strayToken = new MockERC20("Stray", "STRAY", 18);
+        uint256 amount = 10e18;
+        strayToken.mint(address(pooler), amount);
+
+        address recipient = address(0xFFFF);
+        pooler.rescueERC20(address(strayToken), recipient, 0);
+
+        assertEq(strayToken.balanceOf(recipient), 0, "Recipient balance should remain 0");
+        assertEq(strayToken.balanceOf(address(pooler)), amount, "Pooler balance should be unchanged");
+    }
+
+    function test_rescueERC20_revertsOnInsufficientBalance() public {
+        MockERC20 strayToken = new MockERC20("Stray", "STRAY", 18);
+        strayToken.mint(address(pooler), 5e18);
+
+        // Try to rescue more than the pooler holds
+        vm.expectRevert();
+        pooler.rescueERC20(address(strayToken), address(0xAAAA), 10e18);
+    }
 }

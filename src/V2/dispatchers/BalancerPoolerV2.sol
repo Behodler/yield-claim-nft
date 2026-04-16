@@ -189,4 +189,18 @@ contract BalancerPoolerV2 is ATokenDispatcherV2, IUnlockCallback {
     function withdrawBPT(address recipient, uint256 amount) external onlyOwner {
         IERC20(_pool).transfer(recipient, amount);
     }
+
+    /// @notice Owner escape hatch. Transfers `amount` of any ERC20 token held by
+    ///         this contract to `to`. Used to recover tokens stuck on the dispatcher
+    ///         (e.g., accidental transfers, airdrops). Not pause-gated — escape
+    ///         hatch must function during a pause.
+    /// @dev    Does not expand the owner trust surface: the owner already holds
+    ///         `withdrawBPT` and (post-026) `pool(minBPT)`.
+    /// @param  token  The ERC20 token to rescue.
+    /// @param  to     Recipient of the rescued tokens. Must be non-zero.
+    /// @param  amount Amount of `token` to transfer.
+    function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
+        require(to != address(0), "BalancerPoolerV2: zero recipient");
+        IERC20(token).transfer(to, amount);
+    }
 }
