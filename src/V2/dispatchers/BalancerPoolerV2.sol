@@ -108,11 +108,9 @@ contract BalancerPoolerV2 is ATokenDispatcherV2, IUnlockCallback {
 
     /// @notice Dispatches tokens: wraps USDS into sUSDS. Does NOT pool into Balancer.
     /// @param amount The FOT-adjusted amount of USDS to dispatch.
-    function dispatch(address, uint256 amount, bytes calldata /*extraData*/)
-        external
+    function _dispatch(address, uint256 amount, bytes calldata /*extraData*/)
+        internal
         override
-        onlyMinter
-        whenNotPaused
     {
         IERC20(_primeToken).forceApprove(_sUSDS, amount);
         IERC4626(_sUSDS).deposit(amount, address(this));

@@ -26,15 +26,13 @@ contract BurnerV2 is ATokenDispatcherV2 {
 
     /// @notice Burns tokens already on this contract and records the burn.
     /// @param amount The FOT-adjusted amount of token to burn.
-    function dispatch(
+    function _dispatch(
         address,
         uint256 amount,
         bytes calldata /* extraData */
     )
-        external
+        internal
         override
-        onlyMinter
-        whenNotPaused
     {
         IBurnable(_token).burn(amount);
         _burnRecorder.burn(_token, amount);

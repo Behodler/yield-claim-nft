@@ -50,15 +50,13 @@ contract GatherV2 is ATokenDispatcherV2 {
 
     /// @notice Forwards tokens (already on this contract) to the recipient.
     /// @param amount The FOT-adjusted amount of token to forward.
-    function dispatch(
+    function _dispatch(
         address,
         uint256 amount,
         bytes calldata /* extraData */
     )
-        external
+        internal
         override
-        onlyMinter
-        whenNotPaused
     {
         IERC20(_token).safeTransfer(_recipient, amount);
     }
