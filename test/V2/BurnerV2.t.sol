@@ -4,6 +4,8 @@ pragma solidity ^0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {BurnerV2} from "../../src/V2/dispatchers/BurnerV2.sol";
 import {BurnRecorder} from "../../src/BurnRecorder.sol";
+import {IDispatchHook} from "../../src/V2/interfaces/IDispatchHook.sol";
+import {MockDispatchHook} from "../mocks/MockDispatchHook.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 /// @dev Mock ERC20 with burn capability for testing expected burn behavior.
@@ -185,5 +187,26 @@ contract BurnerV2Test is Test {
 
         vm.prank(minter);
         burner.dispatch(minter, amount, "");
+    }
+
+    // =========================================================================
+    // Hook integration tests
+    // =========================================================================
+
+    function test_dispatch_invokesHookWithForwardedArgs() public {
+        MockDispatchHook hook = new MockDispatchHook();
+        burner.setHook(IDispatchHook(address(hook)));
+
+        uint256 amount = 100e18;
+        bytes memory payload = hex"01020304";
+        token.mint(address(burner), amount);
+
+        vm.prank(minter);
+        burner.dispatch(minter, amount, payload);
+
+        assertEq(hook.callCount(), 1, "hook should be called once after burn");
+        assertEq(hook.lastMinter(), minter, "hook should receive minter");
+        assertEq(hook.lastAmount(), amount, "hook should receive amount");
+        assertEq(hook.lastExtraData(), payload, "hook should receive extraData verbatim");
     }
 }

@@ -5,6 +5,8 @@ import {Test} from "forge-std/Test.sol";
 import {BalancerPoolerV2} from "../../src/V2/dispatchers/BalancerPoolerV2.sol";
 import {IUnlockCallback} from "../../src/interfaces/balancer/IUnlockCallback.sol";
 import {AddLiquidityParams, AddLiquidityKind} from "../../src/interfaces/balancer/BalancerTypes.sol";
+import {IDispatchHook} from "../../src/V2/interfaces/IDispatchHook.sol";
+import {MockDispatchHook} from "../mocks/MockDispatchHook.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {MockERC4626} from "../mocks/MockERC4626.sol";
@@ -297,6 +299,47 @@ contract BalancerPoolerV2Test is Test {
         vm.prank(nonOwner);
         vm.expectRevert("ATokenDispatcherV2: caller is not minter");
         pooler.dispatch(nonOwner, amount, "");
+    }
+
+    // =========================================================================
+    // Hook integration tests
+    // =========================================================================
+
+    function test_dispatch_invokesHookAfterWrap() public {
+        MockDispatchHook hook = new MockDispatchHook();
+        pooler.setHook(IDispatchHook(address(hook)));
+
+        uint256 amount = 100e18;
+        bytes memory payload = hex"aabbcc";
+        usds.mint(address(pooler), amount);
+
+        vm.prank(minter);
+        pooler.dispatch(minter, amount, payload);
+
+        // Wrap happened
+        assertEq(sUsds.balanceOf(address(pooler)), amount, "USDS should have been wrapped to sUSDS");
+        // Hook was called exactly once with forwarded args
+        assertEq(hook.callCount(), 1, "hook should be called once");
+        assertEq(hook.lastMinter(), minter, "hook should receive minter");
+        assertEq(hook.lastAmount(), amount, "hook should receive amount");
+        assertEq(hook.lastExtraData(), payload, "hook should receive extraData verbatim");
+    }
+
+    function test_pool_doesNotInvokeHook() public {
+        MockDispatchHook hook = new MockDispatchHook();
+        pooler.setHook(IDispatchHook(address(hook)));
+
+        // Seed sUSDS via dispatch (this consumes one hook invocation)
+        uint256 amount = 100e18;
+        usds.mint(address(pooler), amount);
+        vm.prank(minter);
+        pooler.dispatch(minter, amount, "");
+        assertEq(hook.callCount(), 1, "dispatch should have invoked hook once");
+
+        // Now pool — hook should NOT be invoked again
+        vm.prank(authorizedPooler);
+        pooler.pool(0);
+        assertEq(hook.callCount(), 1, "pool() must not invoke the dispatch hook");
     }
 
     // =========================================================================

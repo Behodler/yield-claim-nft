@@ -4,9 +4,11 @@ pragma solidity ^0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {GatherV2} from "../../src/V2/dispatchers/GatherV2.sol";
 import {NFTMinterV2} from "../../src/V2/NFTMinterV2.sol";
+import {IDispatchHook} from "../../src/V2/interfaces/IDispatchHook.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {MockFOTToken} from "../mocks/MockFOTToken.sol";
+import {MockDispatchHook} from "../mocks/MockDispatchHook.sol";
 
 /// @dev Simple mock ERC20 for testing.
 contract MockERC20 is ERC20 {
@@ -165,6 +167,27 @@ contract GatherV2Test is Test {
     // =========================================================================
     // Integration test: NFTMinterV2 -> GatherV2 -> Recipient
     // =========================================================================
+
+    // =========================================================================
+    // Hook integration tests
+    // =========================================================================
+
+    function test_dispatch_invokesHookWithForwardedArgs() public {
+        MockDispatchHook hook = new MockDispatchHook();
+        gather.setHook(IDispatchHook(address(hook)));
+
+        uint256 amount = 100e18;
+        bytes memory payload = hex"cafebabe";
+        token.mint(address(gather), amount);
+
+        vm.prank(minter);
+        gather.dispatch(minter, amount, payload);
+
+        assertEq(hook.callCount(), 1, "hook should be called once");
+        assertEq(hook.lastMinter(), minter, "hook should receive minter");
+        assertEq(hook.lastAmount(), amount, "hook should receive amount");
+        assertEq(hook.lastExtraData(), payload, "hook should receive extraData verbatim");
+    }
 
     function test_integration_mintNFTWithGatherV2Dispatcher() public {
         NFTMinterV2 nftMinter = new NFTMinterV2(owner);
