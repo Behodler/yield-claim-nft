@@ -264,9 +264,11 @@ contract BalancerPoolerMintDebtHookTest is Test {
     function test_pull_nonReentrant() public {
         ReentrantMockMintable evil = new ReentrantMockMintable();
         BalancerPoolerMintDebtHook h = new BalancerPoolerMintDebtHook(owner, dispatcher, address(evil));
+        // Make the evil contract itself the recipient so it passes the onlyOwnerOrRecipient
+        // gate when re-entering pull() — this isolates the test to the ReentrancyGuard.
+        h.setRecipient(address(evil));
         evil.setTarget(IReentrantPullTarget(address(h)));
 
-        h.setRecipient(recipient);
         vm.prank(dispatcher);
         h.onDispatch(minter, 1000, "");
 
