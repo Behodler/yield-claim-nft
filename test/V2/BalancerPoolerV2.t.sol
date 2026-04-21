@@ -7,6 +7,8 @@ import {IUnlockCallback} from "../../src/interfaces/balancer/IUnlockCallback.sol
 import {AddLiquidityParams, AddLiquidityKind} from "../../src/interfaces/balancer/BalancerTypes.sol";
 import {IDispatchHook} from "../../src/V2/interfaces/IDispatchHook.sol";
 import {MockDispatchHook} from "../mocks/MockDispatchHook.sol";
+import {MockMintable} from "../mocks/MockMintable.sol";
+import {BalancerPoolerMintDebtHook} from "../../src/V2/hooks/BalancerPoolerMintDebtHook.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {MockERC4626} from "../mocks/MockERC4626.sol";
@@ -916,5 +918,65 @@ contract BalancerPoolerV2Test is Test {
         // Try to rescue more than the pooler holds
         vm.expectRevert();
         pooler.rescueERC20(address(strayToken), address(0xAAAA), 10e18);
+    }
+
+    // =========================================================================
+    // BalancerPoolerMintDebtHook integration
+    // =========================================================================
+
+    event DebtAccrued(address indexed minter, uint256 dispatchedAmount, uint256 debtAdded, uint256 newTotalDebt);
+    event DebtPulled(address indexed recipient, uint256 amount);
+
+    function test_mintDebtHook_integration_accruesOnDispatch() public {
+        // Wire a real BalancerPoolerMintDebtHook to the pooler.
+        MockMintable phUSD = new MockMintable();
+        BalancerPoolerMintDebtHook debtHook = new BalancerPoolerMintDebtHook(owner, address(pooler), address(phUSD));
+        pooler.setHook(IDispatchHook(address(debtHook)));
+
+        uint256 amount = 1000e18;
+        uint256 expectedDebt = (amount * 30) / 100; // 300e18
+        usds.mint(address(pooler), amount);
+
+        // Expect the debt-accrued event from the hook.
+        vm.expectEmit(true, false, false, true, address(debtHook));
+        emit DebtAccrued(minter, amount, expectedDebt, expectedDebt);
+
+        vm.prank(minter);
+        pooler.dispatch(minter, amount, "");
+
+        // Debt recorded on the hook.
+        assertEq(debtHook.mintDebt(), expectedDebt, "hook mintDebt should equal 30% of dispatched amount");
+
+        // Existing dispatcher invariants still hold: USDS wrapped into sUSDS, no BPT op.
+        assertEq(sUsds.balanceOf(address(pooler)), amount, "sUSDS should reflect the full wrap");
+        assertEq(usds.balanceOf(address(pooler)), 0, "USDS should be fully wrapped");
+        assertFalse(mockVault.addLiquidityCalled(), "addLiquidity must not fire during dispatch");
+    }
+
+    function test_mintDebtHook_integration_pullMintsPhUSD() public {
+        MockMintable phUSD = new MockMintable();
+        BalancerPoolerMintDebtHook debtHook = new BalancerPoolerMintDebtHook(owner, address(pooler), address(phUSD));
+        pooler.setHook(IDispatchHook(address(debtHook)));
+
+        // Dispatch to accrue debt.
+        uint256 amount = 500e18;
+        uint256 expectedDebt = (amount * 30) / 100; // 150e18
+        usds.mint(address(pooler), amount);
+        vm.prank(minter);
+        pooler.dispatch(minter, amount, "");
+
+        assertEq(debtHook.mintDebt(), expectedDebt, "debt accrued");
+
+        // Set recipient and pull.
+        address stakingModule = address(0xBADA55);
+        debtHook.setRecipient(stakingModule);
+
+        vm.expectEmit(true, false, false, true, address(debtHook));
+        emit DebtPulled(stakingModule, expectedDebt);
+        debtHook.pull();
+
+        assertEq(debtHook.mintDebt(), 0, "debt cleared after pull");
+        assertEq(phUSD.balanceOf(stakingModule), expectedDebt, "phUSD minted to staking module");
+        assertEq(phUSD.mintCallCount(), 1, "exactly one mint call");
     }
 }
