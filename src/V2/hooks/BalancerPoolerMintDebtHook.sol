@@ -2,6 +2,9 @@
 pragma solidity ^0.8.20;
 
 import {IDispatchHook} from "../interfaces/IDispatchHook.sol";
+import {
+    IBalancerPoolerMintDebtHook
+} from "../interfaces/IBalancerPoolerMintDebtHook.sol";
 import {IMintable} from "../../interfaces/IMintable.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {
@@ -17,7 +20,12 @@ import {
 /// @dev    `dispatcher` is immutable — set in the constructor to the already-live
 ///         `BalancerPoolerV2` that will call `onDispatch`. `onDispatch` is gated
 ///         to this dispatcher so no external caller can inflate the debt.
-contract BalancerPoolerMintDebtHook is IDispatchHook, Ownable, ReentrancyGuard {
+contract BalancerPoolerMintDebtHook is
+    IDispatchHook,
+    IBalancerPoolerMintDebtHook,
+    Ownable,
+    ReentrancyGuard
+{
     /// @notice Exclusive upper bound on `ratio`. Max settable ratio is `MAX_RATIO - 1`.
     uint8 public constant MAX_RATIO = 50;
 
