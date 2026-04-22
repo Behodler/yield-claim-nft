@@ -4,7 +4,9 @@ pragma solidity ^0.8.20;
 import {IDispatchHook} from "../interfaces/IDispatchHook.sol";
 import {IMintable} from "../../interfaces/IMintable.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {
+    ReentrancyGuard
+} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /// @title  BalancerPoolerMintDebtHook
 /// @notice `IDispatchHook` implementation that accrues a phUSD *mint debt* on every
@@ -19,8 +21,8 @@ contract BalancerPoolerMintDebtHook is IDispatchHook, Ownable, ReentrancyGuard {
     /// @notice Exclusive upper bound on `ratio`. Max settable ratio is `MAX_RATIO - 1`.
     uint8 public constant MAX_RATIO = 50;
 
-    /// @notice Default ratio applied when the hook is first deployed (30%).
-    uint8 public constant DEFAULT_RATIO = 30;
+    /// @notice Default ratio applied when the hook is first deployed (50%).
+    uint8 public constant DEFAULT_RATIO = 50;
 
     /// @notice The dispatcher permitted to call `onDispatch`. Immutable.
     address public immutable dispatcher;
@@ -38,8 +40,16 @@ contract BalancerPoolerMintDebtHook is IDispatchHook, Ownable, ReentrancyGuard {
     uint8 public ratio;
 
     event RatioUpdated(uint8 oldRatio, uint8 newRatio);
-    event RecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
-    event DebtAccrued(address indexed minter, uint256 dispatchedAmount, uint256 debtAdded, uint256 newTotalDebt);
+    event RecipientUpdated(
+        address indexed oldRecipient,
+        address indexed newRecipient
+    );
+    event DebtAccrued(
+        address indexed minter,
+        uint256 dispatchedAmount,
+        uint256 debtAdded,
+        uint256 newTotalDebt
+    );
     event DebtPulled(address indexed recipient, uint256 amount);
 
     error OnlyDispatcher();
@@ -48,14 +58,19 @@ contract BalancerPoolerMintDebtHook is IDispatchHook, Ownable, ReentrancyGuard {
     error RatioTooHigh();
 
     modifier onlyOwnerOrRecipient() {
-        if (msg.sender != owner() && msg.sender != recipient) revert OnlyOwnerOrRecipient();
+        if (msg.sender != owner() && msg.sender != recipient)
+            revert OnlyOwnerOrRecipient();
         _;
     }
 
     /// @param initialOwner Address granted `Ownable` ownership of the hook.
     /// @param dispatcher_  The BalancerPoolerV2 instance permitted to call `onDispatch`.
     /// @param phUSD_       The mintable phUSD token minted to `recipient` on `pull`.
-    constructor(address initialOwner, address dispatcher_, address phUSD_) Ownable(initialOwner) {
+    constructor(
+        address initialOwner,
+        address dispatcher_,
+        address phUSD_
+    ) Ownable(initialOwner) {
         require(dispatcher_ != address(0), "dispatcher=0");
         require(phUSD_ != address(0), "phUSD=0");
         dispatcher = dispatcher_;
@@ -67,7 +82,7 @@ contract BalancerPoolerMintDebtHook is IDispatchHook, Ownable, ReentrancyGuard {
     /// @notice Update the mint-debt ratio. Only callable by owner.
     /// @param  newRatio Must be strictly less than `MAX_RATIO` (50).
     function setRatio(uint8 newRatio) external onlyOwner {
-        if (newRatio >= MAX_RATIO) revert RatioTooHigh();
+        if (newRatio > MAX_RATIO) revert RatioTooHigh();
         uint8 old = ratio;
         ratio = newRatio;
         emit RatioUpdated(old, newRatio);
@@ -86,7 +101,11 @@ contract BalancerPoolerMintDebtHook is IDispatchHook, Ownable, ReentrancyGuard {
     /// @dev Gated to `dispatcher` to prevent unbounded phUSD debt inflation by
     ///      arbitrary callers. Silent no-op when `added == 0` (zero ratio or
     ///      small-amount rounding) so the debt ledger never emits empty events.
-    function onDispatch(address minter, uint256 amount, bytes calldata) external {
+    function onDispatch(
+        address minter,
+        uint256 amount,
+        bytes calldata
+    ) external {
         if (msg.sender != dispatcher) revert OnlyDispatcher();
         uint256 added = (amount * ratio) / 100;
         if (added == 0) return;

@@ -934,7 +934,7 @@ contract BalancerPoolerV2Test is Test {
         pooler.setHook(IDispatchHook(address(debtHook)));
 
         uint256 amount = 1000e18;
-        uint256 expectedDebt = (amount * 30) / 100; // 300e18
+        uint256 expectedDebt = (amount * 50) / 100; // 500e18
         usds.mint(address(pooler), amount);
 
         // Expect the debt-accrued event from the hook.
@@ -945,7 +945,7 @@ contract BalancerPoolerV2Test is Test {
         pooler.dispatch(minter, amount, "");
 
         // Debt recorded on the hook.
-        assertEq(debtHook.mintDebt(), expectedDebt, "hook mintDebt should equal 30% of dispatched amount");
+        assertEq(debtHook.mintDebt(), expectedDebt, "hook mintDebt should equal 50% of dispatched amount");
 
         // Existing dispatcher invariants still hold: USDS wrapped into sUSDS, no BPT op.
         assertEq(sUsds.balanceOf(address(pooler)), amount, "sUSDS should reflect the full wrap");
@@ -960,7 +960,7 @@ contract BalancerPoolerV2Test is Test {
 
         // Dispatch to accrue debt.
         uint256 amount = 500e18;
-        uint256 expectedDebt = (amount * 30) / 100; // 150e18
+        uint256 expectedDebt = (amount * 50) / 100; // 250e18
         usds.mint(address(pooler), amount);
         vm.prank(minter);
         pooler.dispatch(minter, amount, "");

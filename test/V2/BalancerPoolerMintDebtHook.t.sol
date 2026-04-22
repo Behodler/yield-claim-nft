@@ -3,9 +3,15 @@ pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
-import {BalancerPoolerMintDebtHook} from "../../src/V2/hooks/BalancerPoolerMintDebtHook.sol";
+import {
+    BalancerPoolerMintDebtHook
+} from "../../src/V2/hooks/BalancerPoolerMintDebtHook.sol";
 import {IMintable} from "../../src/interfaces/IMintable.sol";
-import {MockMintable, ReentrantMockMintable, IReentrantPullTarget} from "../mocks/MockMintable.sol";
+import {
+    MockMintable,
+    ReentrantMockMintable,
+    IReentrantPullTarget
+} from "../mocks/MockMintable.sol";
 
 contract BalancerPoolerMintDebtHookTest is Test {
     BalancerPoolerMintDebtHook internal hookContract;
@@ -19,13 +25,25 @@ contract BalancerPoolerMintDebtHookTest is Test {
 
     // Mirror the events from the hook for vm.expectEmit
     event RatioUpdated(uint8 oldRatio, uint8 newRatio);
-    event RecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
-    event DebtAccrued(address indexed minter, uint256 dispatchedAmount, uint256 debtAdded, uint256 newTotalDebt);
+    event RecipientUpdated(
+        address indexed oldRecipient,
+        address indexed newRecipient
+    );
+    event DebtAccrued(
+        address indexed minter,
+        uint256 dispatchedAmount,
+        uint256 debtAdded,
+        uint256 newTotalDebt
+    );
     event DebtPulled(address indexed recipient, uint256 amount);
 
     function setUp() public {
         phUSD = new MockMintable();
-        hookContract = new BalancerPoolerMintDebtHook(owner, dispatcher, address(phUSD));
+        hookContract = new BalancerPoolerMintDebtHook(
+            owner,
+            dispatcher,
+            address(phUSD)
+        );
     }
 
     // =========================================================================
@@ -43,26 +61,38 @@ contract BalancerPoolerMintDebtHookTest is Test {
     }
 
     function test_constructor_setsDispatcherAndPhUSD() public view {
-        assertEq(hookContract.dispatcher(), dispatcher, "dispatcher should match ctor arg");
-        assertEq(address(hookContract.phUSD()), address(phUSD), "phUSD should match ctor arg");
+        assertEq(
+            hookContract.dispatcher(),
+            dispatcher,
+            "dispatcher should match ctor arg"
+        );
+        assertEq(
+            address(hookContract.phUSD()),
+            address(phUSD),
+            "phUSD should match ctor arg"
+        );
     }
 
     function test_constructor_setsDefaultRatio() public view {
-        assertEq(hookContract.ratio(), 30, "ratio should default to 30");
-        assertEq(hookContract.DEFAULT_RATIO(), 30, "DEFAULT_RATIO constant");
+        assertEq(hookContract.ratio(), 50, "ratio should default to 50");
+        assertEq(hookContract.DEFAULT_RATIO(), 50, "DEFAULT_RATIO constant");
         assertEq(hookContract.MAX_RATIO(), 50, "MAX_RATIO constant");
     }
 
     function test_constructor_emitsRatioUpdated() public {
         MockMintable freshPhUSD = new MockMintable();
         vm.expectEmit(false, false, false, true);
-        emit RatioUpdated(0, 30);
+        emit RatioUpdated(0, 50);
         new BalancerPoolerMintDebtHook(owner, dispatcher, address(freshPhUSD));
     }
 
     function test_constructor_transfersOwnershipToInitialOwner() public {
         address newOwner = address(0xCAFE);
-        BalancerPoolerMintDebtHook h = new BalancerPoolerMintDebtHook(newOwner, dispatcher, address(phUSD));
+        BalancerPoolerMintDebtHook h = new BalancerPoolerMintDebtHook(
+            newOwner,
+            dispatcher,
+            address(phUSD)
+        );
         assertEq(h.owner(), newOwner, "owner should be initialOwner");
     }
 
@@ -72,20 +102,25 @@ contract BalancerPoolerMintDebtHookTest is Test {
 
     function test_setRatio_revertsForNonOwner() public {
         vm.prank(nonOwner);
-        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "OwnableUnauthorizedAccount(address)",
+                nonOwner
+            )
+        );
         hookContract.setRatio(10);
     }
 
     function test_setRatio_49Succeeds_andEmits() public {
         vm.expectEmit(false, false, false, true);
-        emit RatioUpdated(30, 49);
+        emit RatioUpdated(50, 49);
         hookContract.setRatio(49);
         assertEq(hookContract.ratio(), 49, "ratio should be 49");
     }
 
-    function test_setRatio_50Reverts() public {
+    function test_setRatio_51Reverts() public {
         vm.expectRevert(BalancerPoolerMintDebtHook.RatioTooHigh.selector);
-        hookContract.setRatio(50);
+        hookContract.setRatio(51);
     }
 
     function test_setRatio_200Reverts() public {
@@ -95,7 +130,7 @@ contract BalancerPoolerMintDebtHookTest is Test {
 
     function test_setRatio_0Succeeds() public {
         vm.expectEmit(false, false, false, true);
-        emit RatioUpdated(30, 0);
+        emit RatioUpdated(50, 0);
         hookContract.setRatio(0);
         assertEq(hookContract.ratio(), 0, "ratio should be 0");
     }
@@ -106,7 +141,12 @@ contract BalancerPoolerMintDebtHookTest is Test {
 
     function test_setRecipient_revertsForNonOwner() public {
         vm.prank(nonOwner);
-        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "OwnableUnauthorizedAccount(address)",
+                nonOwner
+            )
+        );
         hookContract.setRecipient(recipient);
     }
 
@@ -142,7 +182,7 @@ contract BalancerPoolerMintDebtHookTest is Test {
 
     function test_onDispatch_accruesDebt_defaultRatio() public {
         uint256 amount = 1000;
-        uint256 expectedAdded = 300; // 30% of 1000
+        uint256 expectedAdded = 500; // 50% of 1000
 
         vm.expectEmit(true, false, false, true);
         emit DebtAccrued(minter, amount, expectedAdded, expectedAdded);
@@ -150,7 +190,11 @@ contract BalancerPoolerMintDebtHookTest is Test {
         vm.prank(dispatcher);
         hookContract.onDispatch(minter, amount, "");
 
-        assertEq(hookContract.mintDebt(), expectedAdded, "mintDebt should be 300");
+        assertEq(
+            hookContract.mintDebt(),
+            expectedAdded,
+            "mintDebt should be 500"
+        );
     }
 
     function test_onDispatch_multipleCallsAccumulate() public {
@@ -158,7 +202,11 @@ contract BalancerPoolerMintDebtHookTest is Test {
         hookContract.onDispatch(minter, 1000, "");
         vm.prank(dispatcher);
         hookContract.onDispatch(minter, 1000, "");
-        assertEq(hookContract.mintDebt(), 600, "mintDebt should accumulate to 600");
+        assertEq(
+            hookContract.mintDebt(),
+            1000,
+            "mintDebt should accumulate to 1000"
+        );
     }
 
     function test_onDispatch_zeroRatio_noDebt_noEvent() public {
@@ -174,10 +222,10 @@ contract BalancerPoolerMintDebtHookTest is Test {
     }
 
     function test_onDispatch_smallAmountRoundingToZero_noEvent() public {
-        // With ratio=30 and amount=3, (3*30)/100 = 0 -> should be silent no-op
+        // With ratio=50 and amount=1, (1*50)/100 = 0 -> should be silent no-op
         vm.recordLogs();
         vm.prank(dispatcher);
-        hookContract.onDispatch(minter, 3, "");
+        hookContract.onDispatch(minter, 1, "");
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
         assertEq(logs.length, 0, "no events on zero-added rounding case");
@@ -189,14 +237,18 @@ contract BalancerPoolerMintDebtHookTest is Test {
         bytes memory payload = hex"deadbeef1234";
         vm.prank(dispatcher);
         hookContract.onDispatch(minter, 1000, payload);
-        assertEq(hookContract.mintDebt(), 300, "mintDebt should still be 300");
+        assertEq(hookContract.mintDebt(), 500, "mintDebt should still be 500");
     }
 
     function test_onDispatch_ratio49() public {
         hookContract.setRatio(49);
         vm.prank(dispatcher);
         hookContract.onDispatch(minter, 1000, "");
-        assertEq(hookContract.mintDebt(), 490, "mintDebt should be 490 at ratio=49");
+        assertEq(
+            hookContract.mintDebt(),
+            490,
+            "mintDebt should be 490 at ratio=49"
+        );
     }
 
     // =========================================================================
@@ -218,7 +270,9 @@ contract BalancerPoolerMintDebtHookTest is Test {
         hookContract.onDispatch(minter, 1000, "");
 
         vm.prank(nonOwner);
-        vm.expectRevert(BalancerPoolerMintDebtHook.OnlyOwnerOrRecipient.selector);
+        vm.expectRevert(
+            BalancerPoolerMintDebtHook.OnlyOwnerOrRecipient.selector
+        );
         hookContract.pull();
     }
 
@@ -228,15 +282,23 @@ contract BalancerPoolerMintDebtHookTest is Test {
         hookContract.onDispatch(minter, 1000, "");
 
         vm.expectEmit(true, false, false, true);
-        emit DebtPulled(recipient, 300);
+        emit DebtPulled(recipient, 500);
         hookContract.pull(); // owner = address(this)
 
-        assertEq(hookContract.mintDebt(), 0, "mintDebt should be zero after pull");
-        assertEq(phUSD.balanceOf(recipient), 300, "phUSD should have been minted to recipient");
+        assertEq(
+            hookContract.mintDebt(),
+            0,
+            "mintDebt should be zero after pull"
+        );
+        assertEq(
+            phUSD.balanceOf(recipient),
+            500,
+            "phUSD should have been minted to recipient"
+        );
         assertEq(phUSD.mintCallCount(), 1, "exactly one mint call");
         (address r, uint256 a) = phUSD.lastMint();
         assertEq(r, recipient, "mint recipient");
-        assertEq(a, 300, "mint amount");
+        assertEq(a, 500, "mint amount");
     }
 
     function test_pull_recipientCanPull() public {
@@ -248,7 +310,7 @@ contract BalancerPoolerMintDebtHookTest is Test {
         hookContract.pull();
 
         assertEq(hookContract.mintDebt(), 0, "mintDebt cleared");
-        assertEq(phUSD.balanceOf(recipient), 300, "phUSD minted");
+        assertEq(phUSD.balanceOf(recipient), 500, "phUSD minted");
     }
 
     function test_pull_noOpWhenDebtIsZero_afterRecipientSet() public {
@@ -263,7 +325,11 @@ contract BalancerPoolerMintDebtHookTest is Test {
 
     function test_pull_nonReentrant() public {
         ReentrantMockMintable evil = new ReentrantMockMintable();
-        BalancerPoolerMintDebtHook h = new BalancerPoolerMintDebtHook(owner, dispatcher, address(evil));
+        BalancerPoolerMintDebtHook h = new BalancerPoolerMintDebtHook(
+            owner,
+            dispatcher,
+            address(evil)
+        );
         // Make the evil contract itself the recipient so it passes the onlyOwnerOrRecipient
         // gate when re-entering pull() — this isolates the test to the ReentrancyGuard.
         h.setRecipient(address(evil));
@@ -286,6 +352,10 @@ contract BalancerPoolerMintDebtHookTest is Test {
         assembly {
             sel := mload(add(reason, 32))
         }
-        assertEq(sel, bytes4(keccak256("ReentrancyGuardReentrantCall()")), "selector match");
+        assertEq(
+            sel,
+            bytes4(keccak256("ReentrancyGuardReentrantCall()")),
+            "selector match"
+        );
     }
 }
