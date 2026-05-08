@@ -4,7 +4,12 @@ pragma solidity ^0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {BalancerPoolerV2} from "../../src/V2/dispatchers/BalancerPoolerV2.sol";
 import {IUnlockCallback} from "../../src/interfaces/balancer/IUnlockCallback.sol";
-import {AddLiquidityParams, AddLiquidityKind} from "../../src/interfaces/balancer/BalancerTypes.sol";
+import {
+    AddLiquidityParams,
+    AddLiquidityKind,
+    VaultSwapParams,
+    SwapKind
+} from "../../src/interfaces/balancer/BalancerTypes.sol";
 import {IDispatchHook} from "../../src/V2/interfaces/IDispatchHook.sol";
 import {MockDispatchHook} from "../mocks/MockDispatchHook.sol";
 import {MockMintable} from "../mocks/MockMintable.sol";
@@ -12,6 +17,7 @@ import {BalancerPoolerMintDebtHook} from "../../src/V2/hooks/BalancerPoolerMintD
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {MockERC4626} from "../mocks/MockERC4626.sol";
+import {MockERC4626Wrapper} from "../mocks/MockERC4626Wrapper.sol";
 
 /// @dev Mock ERC20 with configurable decimals for testing.
 contract MockERC20 is ERC20 {
@@ -44,6 +50,22 @@ contract MockBalancerVault {
     }
 
     Settlement[] public settlements;
+
+    /// @dev Captured `swap` invocation state.
+    bool public swapCalled;
+    SwapKind public lastSwapKind;
+    address public lastSwapPool;
+    address public lastSwapTokenIn;
+    address public lastSwapTokenOut;
+    uint256 public lastSwapAmountGivenRaw;
+    uint256 public lastSwapLimitRaw;
+    bytes public lastSwapUserData;
+
+    /// @dev Configurable swap output rate, in basis points relative to amountGivenRaw
+    ///      (10000 = 1:1, 5000 = 0.5x, etc.). Tests can also override via
+    ///      `setConfigurableSwapOut` to return a fixed amount.
+    uint256 public swapRateBps = 10000;
+    uint256 public configurableSwapOut;
 
     function unlock(bytes calldata data) external returns (bytes memory result) {
         (bool success, bytes memory returnData) = msg.sender.call(data);
@@ -88,7 +110,43 @@ contract MockBalancerVault {
         return amountHint;
     }
 
+    function swap(VaultSwapParams memory params)
+        external
+        returns (uint256 amountCalculatedRaw, uint256 amountInRaw, uint256 amountOutRaw)
+    {
+        swapCalled = true;
+        lastSwapKind = params.kind;
+        lastSwapPool = params.pool;
+        lastSwapTokenIn = address(params.tokenIn);
+        lastSwapTokenOut = address(params.tokenOut);
+        lastSwapAmountGivenRaw = params.amountGivenRaw;
+        lastSwapLimitRaw = params.limitRaw;
+        lastSwapUserData = params.userData;
+
+        amountInRaw = params.amountGivenRaw;
+        amountOutRaw = configurableSwapOut > 0
+            ? configurableSwapOut
+            : (params.amountGivenRaw * swapRateBps) / 10000;
+        amountCalculatedRaw = 0;
+
+        // Mint tokenOut to msg.sender (the dispatcher) — caller is expected to
+        // have already transferred tokenIn to this vault before calling swap.
+        MockERC4626Wrapper(address(params.tokenOut)).mintShares(msg.sender, amountOutRaw);
+    }
+
     function sendTo(IERC20, address, uint256) external pure {}
+
+    function setSwapRateBps(uint256 rateBps) external {
+        swapRateBps = rateBps;
+    }
+
+    function setConfigurableSwapOut(uint256 amount) external {
+        configurableSwapOut = amount;
+    }
+
+    function resetSwapCalled() external {
+        swapCalled = false;
+    }
 
     /// @dev Set a fixed BPT output amount (for slippage testing). Set 0 to revert to default.
     function setConfigurableBptOut(uint256 amount) external {
@@ -340,7 +398,7 @@ contract BalancerPoolerV2Test is Test {
 
         // Now pool — hook should NOT be invoked again
         vm.prank(authorizedPooler);
-        pooler.pool(0);
+        pooler.pool(0, 0);
         assertEq(hook.callCount(), 1, "pool() must not invoke the dispatch hook");
     }
 
@@ -357,13 +415,13 @@ contract BalancerPoolerV2Test is Test {
 
         vm.prank(nonOwner);
         vm.expectRevert("BalancerPoolerV2: caller not authorized pooler");
-        pooler.pool(0);
+        pooler.pool(0, 0);
     }
 
     function test_pool_revertsWhenSUSDSBalanceIsZero() public {
         vm.prank(authorizedPooler);
         vm.expectRevert("BalancerPoolerV2: nothing to pool");
-        pooler.pool(0);
+        pooler.pool(0, 0);
     }
 
     function test_pool_endToEnd() public {
@@ -381,7 +439,7 @@ contract BalancerPoolerV2Test is Test {
         vm.prank(authorizedPooler);
         vm.expectEmit(true, false, false, true);
         emit BalancerPoolerV2.Pooled(authorizedPooler, amount, amount, 0);
-        pooler.pool(0);
+        pooler.pool(0, 0);
 
         // Verify: vault received sUSDS, dispatcher received BPT, sUSDS drained
         assertEq(sUsds.balanceOf(address(mockVault)), amount, "Vault should have received sUSDS");
@@ -403,7 +461,7 @@ contract BalancerPoolerV2Test is Test {
         // pool should revert even for authorized pooler
         vm.prank(authorizedPooler);
         vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
-        pooler.pool(0);
+        pooler.pool(0, 0);
     }
 
     function test_pool_slippageFloorEnforced() public {
@@ -417,7 +475,7 @@ contract BalancerPoolerV2Test is Test {
 
         vm.prank(authorizedPooler);
         vm.expectRevert("MockBalancerVault: unlock callback failed");
-        pooler.pool(80e18); // minBPT = 80e18, but vault returns 50e18
+        pooler.pool(80e18, 0); // minBPT = 80e18, but vault returns 50e18
     }
 
     function test_pool_sUSDSIsSecond_correctOrdering() public {
@@ -435,7 +493,7 @@ contract BalancerPoolerV2Test is Test {
         poolerReversed.dispatch(minter, amount, "");
 
         vm.prank(authorizedPooler);
-        poolerReversed.pool(0);
+        poolerReversed.pool(0, 0);
 
         uint256[] memory amounts = mockVault.getLastParamsMaxAmountsIn();
         assertEq(amounts[0], 0, "maxAmountsIn[0] should be 0 when sUSDSIsFirst=false");
@@ -459,7 +517,7 @@ contract BalancerPoolerV2Test is Test {
 
         // Single pool drains all
         vm.prank(authorizedPooler);
-        pooler.pool(0);
+        pooler.pool(0, 0);
 
         assertEq(sUsds.balanceOf(address(pooler)), 0, "All sUSDS should be drained after pool");
         assertEq(bptToken.balanceOf(address(pooler)), 125e18, "BPT should reflect total pooled");
@@ -480,7 +538,7 @@ contract BalancerPoolerV2Test is Test {
         assertEq(sUsds.balanceOf(address(pooler)), expectedShares, "sUSDS should be shares not assets");
 
         vm.prank(authorizedPooler);
-        pooler.pool(0);
+        pooler.pool(0, 0);
 
         uint256[] memory amounts = mockVault.getLastParamsMaxAmountsIn();
         assertEq(amounts[0], expectedShares, "maxAmountsIn should use sUSDS shares, not USDS assets");
@@ -595,7 +653,7 @@ contract BalancerPoolerV2Test is Test {
 
         vm.prank(p);
         vm.expectRevert("BalancerPoolerV2: caller not authorized pooler");
-        pooler.pool(0);
+        pooler.pool(0, 0);
     }
 
     // =========================================================================
@@ -629,18 +687,18 @@ contract BalancerPoolerV2Test is Test {
 
         vm.prank(poolerA);
         vm.expectRevert("BalancerPoolerV2: caller not authorized pooler");
-        pooler.pool(0);
+        pooler.pool(0, 0);
 
         vm.prank(poolerB);
         vm.expectRevert("BalancerPoolerV2: caller not authorized pooler");
-        pooler.pool(0);
+        pooler.pool(0, 0);
 
         // Re-authorize only poolerA
         pooler.setAuthorizedPooler(poolerA, true);
         assertEq(pooler.poolerAuthVersion(poolerA), 2, "poolerA should be at version 2");
 
         vm.prank(poolerA);
-        pooler.pool(0);
+        pooler.pool(0, 0);
 
         // poolerB still reverts
         // Need more sUSDS for another attempt
@@ -650,7 +708,7 @@ contract BalancerPoolerV2Test is Test {
 
         vm.prank(poolerB);
         vm.expectRevert("BalancerPoolerV2: caller not authorized pooler");
-        pooler.pool(0);
+        pooler.pool(0, 0);
     }
 
     function test_staleAuthorizationBoundary() public {
@@ -673,14 +731,14 @@ contract BalancerPoolerV2Test is Test {
 
         vm.prank(p);
         vm.expectRevert("BalancerPoolerV2: caller not authorized pooler");
-        pooler.pool(0);
+        pooler.pool(0, 0);
 
         // Re-authorize -> should now work with version 2
         pooler.setAuthorizedPooler(p, true);
         assertEq(pooler.poolerAuthVersion(p), 2, "Re-authorized at version 2");
 
         vm.prank(p);
-        pooler.pool(0);
+        pooler.pool(0, 0);
     }
 
     // =========================================================================
@@ -755,7 +813,7 @@ contract BalancerPoolerV2Test is Test {
     function test_unlockCallback_revertsIfCallerIsNotVault() public {
         vm.prank(nonOwner);
         vm.expectRevert("BalancerPoolerV2: caller is not vault");
-        pooler.unlockCallback(abi.encode(address(0x1), uint256(100e18), uint256(0)));
+        pooler.unlockCallback(abi.encode(address(0x1), uint256(100e18), uint256(0), uint256(0)));
     }
 
     // =========================================================================
@@ -770,7 +828,7 @@ contract BalancerPoolerV2Test is Test {
         pooler.dispatch(minter, amount, "");
 
         vm.prank(authorizedPooler);
-        pooler.pool(0);
+        pooler.pool(0, 0);
 
         uint256 settlementsCount = mockVault.getSettlementsCount();
         assertEq(settlementsCount, 1, "Should have 1 settlement");
@@ -792,7 +850,7 @@ contract BalancerPoolerV2Test is Test {
         pooler.dispatch(minter, amount, "");
 
         vm.prank(authorizedPooler);
-        pooler.pool(0);
+        pooler.pool(0, 0);
 
         uint256 poolerBpt = bptToken.balanceOf(address(pooler));
         assertTrue(poolerBpt > 0, "Pooler should have BPT");
@@ -854,7 +912,7 @@ contract BalancerPoolerV2Test is Test {
         pooler.dispatch(minter, amount, "");
 
         vm.prank(authorizedPooler);
-        pooler.pool(0);
+        pooler.pool(0, 0);
 
         uint256 poolerBpt = bptToken.balanceOf(address(pooler));
         assertTrue(poolerBpt > 0, "Pooler should have BPT after pooling");
