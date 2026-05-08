@@ -1037,4 +1037,379 @@ contract BalancerPoolerV2Test is Test {
         assertEq(phUSD.balanceOf(stakingModule), expectedDebt, "phUSD minted to staking module");
         assertEq(phUSD.mintCallCount(), 1, "exactly one mint call");
     }
+
+    // =========================================================================
+    // Story-031: Batch donation — setters
+    // =========================================================================
+
+    address public batchMinter = address(0xBA7C);
+    MockERC20 public usdc;
+    MockERC4626Wrapper public waUsdc;
+    address public swapPool = address(0xB0011); // dummy swap pool address; mock vault ignores it
+
+    /// @dev Helper: wire up donation config (mocks + setters) on `pooler`.
+    function _wireDonation(uint256 size) internal {
+        if (address(usdc) == address(0)) {
+            usdc = new MockERC20("USD Coin", "USDC", 6);
+            waUsdc = new MockERC4626Wrapper("Wrapped Aave USDC", "waUSDC", address(usdc), 6, 10000);
+        }
+        pooler.setBatchMinter(batchMinter);
+        pooler.setSwapConfig(swapPool, address(waUsdc), address(usdc));
+        pooler.setBatchDonationSize(size);
+    }
+
+    /// @dev Helper: seed the waUSDC wrapper with USDC liquidity so its `redeem` can pay out.
+    function _fundWaUsdc(uint256 usdcAmount) internal {
+        usdc.mint(address(waUsdc), usdcAmount);
+    }
+
+    function test_setBatchDonationSize_zeroAllowedAndEmits() public {
+        vm.expectEmit(false, false, false, true);
+        emit BalancerPoolerV2.BatchDonationSizeSet(0);
+        pooler.setBatchDonationSize(0);
+        assertEq(pooler.batchDonationSize(), 0);
+    }
+
+    function test_setBatchDonationSize_oneHundredAllowedAndEmits() public {
+        vm.expectEmit(false, false, false, true);
+        emit BalancerPoolerV2.BatchDonationSizeSet(100);
+        pooler.setBatchDonationSize(100);
+        assertEq(pooler.batchDonationSize(), 100);
+    }
+
+    function test_setBatchDonationSize_revertsAbove100() public {
+        vm.expectRevert("BalancerPoolerV2: size > 100");
+        pooler.setBatchDonationSize(101);
+    }
+
+    function test_setBatchDonationSize_revertsForNonOwner() public {
+        vm.prank(nonOwner);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
+        pooler.setBatchDonationSize(10);
+    }
+
+    function test_setBatchMinter_zeroAddressAllowed() public {
+        // First set non-zero, then zero — both must succeed.
+        pooler.setBatchMinter(address(0xCAFE));
+        assertEq(pooler.batchMinter(), address(0xCAFE));
+
+        vm.expectEmit(false, false, false, true);
+        emit BalancerPoolerV2.BatchMinterSet(address(0));
+        pooler.setBatchMinter(address(0));
+        assertEq(pooler.batchMinter(), address(0));
+    }
+
+    function test_setBatchMinter_emitsEventWithNewAddress() public {
+        vm.expectEmit(false, false, false, true);
+        emit BalancerPoolerV2.BatchMinterSet(batchMinter);
+        pooler.setBatchMinter(batchMinter);
+        assertEq(pooler.batchMinter(), batchMinter);
+    }
+
+    function test_setBatchMinter_revertsForNonOwner() public {
+        vm.prank(nonOwner);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
+        pooler.setBatchMinter(batchMinter);
+    }
+
+    function test_setSwapConfig_revertsOnZeroSwapPool() public {
+        vm.expectRevert("BalancerPoolerV2: zero swapPool");
+        pooler.setSwapConfig(address(0), address(0xAA), address(0xBB));
+    }
+
+    function test_setSwapConfig_revertsOnZeroWaUsdc() public {
+        vm.expectRevert("BalancerPoolerV2: zero waUsdc");
+        pooler.setSwapConfig(address(0xAA), address(0), address(0xBB));
+    }
+
+    function test_setSwapConfig_revertsOnZeroUsdc() public {
+        vm.expectRevert("BalancerPoolerV2: zero usdc");
+        pooler.setSwapConfig(address(0xAA), address(0xBB), address(0));
+    }
+
+    function test_setSwapConfig_storesAllThreeAndEmits() public {
+        usdc = new MockERC20("USD Coin", "USDC", 6);
+        waUsdc = new MockERC4626Wrapper("Wrapped Aave USDC", "waUSDC", address(usdc), 6, 10000);
+
+        vm.expectEmit(false, false, false, true);
+        emit BalancerPoolerV2.SwapConfigSet(swapPool, address(waUsdc), address(usdc));
+        pooler.setSwapConfig(swapPool, address(waUsdc), address(usdc));
+
+        assertEq(pooler.swapPool(), swapPool);
+        assertEq(pooler.waUsdc(), address(waUsdc));
+        assertEq(pooler.usdc(), address(usdc));
+    }
+
+    function test_setSwapConfig_revertsForNonOwner() public {
+        vm.prank(nonOwner);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
+        pooler.setSwapConfig(address(0xAA), address(0xBB), address(0xCC));
+    }
+
+    // =========================================================================
+    // Story-031: Batch donation — donation skipped (parity with old behaviour)
+    // =========================================================================
+
+    function _seedSUSDS(uint256 amount) internal {
+        usds.mint(address(pooler), amount);
+        vm.prank(minter);
+        pooler.dispatch(minter, amount, "");
+    }
+
+    function test_pool_defaultStateNoDonation_fullLP() public {
+        uint256 amount = 1000e18;
+        _seedSUSDS(amount);
+
+        vm.prank(authorizedPooler);
+        pooler.pool(0, 0);
+
+        // Full sUSDS amount went to LP; no swap occurred.
+        assertEq(sUsds.balanceOf(address(mockVault)), amount, "Vault should hold full sUSDS");
+        assertEq(bptToken.balanceOf(address(pooler)), amount, "Pooler should hold full BPT");
+        assertFalse(mockVault.swapCalled(), "swap should NOT have been called");
+        assertTrue(mockVault.addLiquidityCalled(), "addLiquidity should have fired");
+    }
+
+    function test_pool_donationSizeSetButBatchMinterUnset_skipsDonation() public {
+        uint256 amount = 1000e18;
+        _seedSUSDS(amount);
+
+        // Set size but leave batchMinter as 0 (and don't set swap config).
+        pooler.setBatchDonationSize(30);
+
+        vm.prank(authorizedPooler);
+        pooler.pool(0, 0);
+
+        assertFalse(mockVault.swapCalled(), "swap should NOT fire when batchMinter is unset");
+        assertEq(bptToken.balanceOf(address(pooler)), amount, "All sUSDS should go to LP");
+    }
+
+    function test_pool_donationSizeSetButSwapPoolUnset_skipsDonation() public {
+        uint256 amount = 1000e18;
+        _seedSUSDS(amount);
+
+        // Set size + batchMinter, leave swap config unset (all zero).
+        pooler.setBatchDonationSize(30);
+        pooler.setBatchMinter(batchMinter);
+
+        vm.prank(authorizedPooler);
+        pooler.pool(0, 0);
+
+        assertFalse(mockVault.swapCalled(), "swap should NOT fire when swap config is unset");
+        assertEq(bptToken.balanceOf(address(pooler)), amount, "All sUSDS should go to LP");
+    }
+
+    function test_pool_donationRoundsToZero_skipsDonation() public {
+        // batchDonationSize = 1, sUSDSAmount = 50 wei -> donationSUSDS = 0
+        uint256 amount = 50;
+        _seedSUSDS(amount);
+        _wireDonation(1);
+
+        // Confirm assumption: (50 * 1) / 100 == 0.
+        assertEq((amount * 1) / 100, 0, "donationSUSDS should round to 0");
+
+        vm.prank(authorizedPooler);
+        pooler.pool(0, 0);
+
+        assertFalse(mockVault.swapCalled(), "swap should NOT fire when donationSUSDS rounds to 0");
+        assertEq(bptToken.balanceOf(address(pooler)), amount, "Full amount should go to LP");
+    }
+
+    // =========================================================================
+    // Story-031: Batch donation — donation active
+    // =========================================================================
+
+    function test_pool_donation30Percent_correctSplit() public {
+        uint256 amount = 1000e18;
+        _seedSUSDS(amount);
+        _wireDonation(30);
+
+        // Mock vault swap returns waUSDC at 6e-12 ratio (1e18 sUSDS -> 1e6 waUSDC).
+        // At 30% donation: 300e18 sUSDS -> 300e6 waUSDC -> 300e6 USDC.
+        mockVault.setConfigurableSwapOut(300e6);
+        _fundWaUsdc(300e6);
+
+        vm.prank(authorizedPooler);
+        pooler.pool(0, 0);
+
+        // Swap captured params
+        assertTrue(mockVault.swapCalled(), "swap should fire");
+        assertEq(uint256(mockVault.lastSwapKind()), uint256(SwapKind.EXACT_IN));
+        assertEq(mockVault.lastSwapPool(), swapPool);
+        assertEq(mockVault.lastSwapTokenIn(), address(sUsds));
+        assertEq(mockVault.lastSwapTokenOut(), address(waUsdc));
+        assertEq(mockVault.lastSwapAmountGivenRaw(), 300e18, "30% of 1000e18 sUSDS swapped");
+        assertEq(mockVault.lastSwapLimitRaw(), 0, "limitRaw should be 0 (final check on USDC)");
+
+        // USDC delivered to batchMinter
+        assertEq(usdc.balanceOf(batchMinter), 300e6, "batchMinter should receive 300e6 USDC");
+
+        // Remaining 700e18 sUSDS went to LP
+        assertTrue(mockVault.addLiquidityCalled(), "LP add should still fire");
+        uint256[] memory amounts = mockVault.getLastParamsMaxAmountsIn();
+        assertEq(amounts[0], 700e18, "LP should receive 70% of sUSDS");
+        assertEq(bptToken.balanceOf(address(pooler)), 700e18, "Pooler should hold 700e18 BPT");
+    }
+
+    function test_pool_donation100Percent_skipsLP() public {
+        uint256 amount = 500e18;
+        _seedSUSDS(amount);
+        _wireDonation(100);
+
+        mockVault.setConfigurableSwapOut(500e6);
+        _fundWaUsdc(500e6);
+
+        // No Pooled event should fire at 100% donation
+        vm.prank(authorizedPooler);
+        pooler.pool(0, 0);
+
+        assertTrue(mockVault.swapCalled(), "swap should fire");
+        assertFalse(mockVault.addLiquidityCalled(), "LP add MUST NOT fire at 100% donation");
+        assertEq(usdc.balanceOf(batchMinter), 500e6, "batchMinter receives full USDC equivalent");
+        assertEq(bptToken.balanceOf(address(pooler)), 0, "No BPT at 100% donation");
+    }
+
+    function test_pool_donation1Percent_correctMath() public {
+        uint256 amount = 100_000e18;
+        _seedSUSDS(amount);
+        _wireDonation(1);
+
+        uint256 expectedDonation = 1_000e18; // 1% of 100_000e18
+        mockVault.setConfigurableSwapOut(1_000e6);
+        _fundWaUsdc(1_000e6);
+
+        vm.prank(authorizedPooler);
+        pooler.pool(0, 0);
+
+        assertEq(mockVault.lastSwapAmountGivenRaw(), expectedDonation, "1% should be 1000e18");
+        assertEq(usdc.balanceOf(batchMinter), 1_000e6, "USDC delivered correctly");
+        assertEq(bptToken.balanceOf(address(pooler)), 99_000e18, "99% goes to LP");
+    }
+
+    function test_pool_donation_slippageRevert_whenUsdcBelowMin() public {
+        uint256 amount = 1000e18;
+        _seedSUSDS(amount);
+        _wireDonation(50);
+
+        // Configure swap to return only 100e6 waUSDC; unwrap is 1:1 -> 100e6 USDC
+        mockVault.setConfigurableSwapOut(100e6);
+        _fundWaUsdc(100e6);
+
+        // Demand 200e6 USDC minimum -> revert
+        vm.prank(authorizedPooler);
+        vm.expectRevert("MockBalancerVault: unlock callback failed");
+        pooler.pool(0, 200e6);
+    }
+
+    function test_pool_donation_slippageAccepted_whenUsdcAtMin() public {
+        uint256 amount = 1000e18;
+        _seedSUSDS(amount);
+        _wireDonation(50);
+
+        // Swap returns exactly 250e6
+        mockVault.setConfigurableSwapOut(250e6);
+        _fundWaUsdc(250e6);
+
+        vm.prank(authorizedPooler);
+        pooler.pool(0, 250e6); // exactly at the minimum
+        assertEq(usdc.balanceOf(batchMinter), 250e6, "USDC at min accepted");
+    }
+
+    function test_pool_donation_emitsBatchDonatedEvent() public {
+        uint256 amount = 1000e18;
+        _seedSUSDS(amount);
+        _wireDonation(40);
+
+        mockVault.setConfigurableSwapOut(400e6);
+        _fundWaUsdc(400e6);
+
+        vm.expectEmit(true, true, false, true);
+        emit BalancerPoolerV2.BatchDonated(authorizedPooler, 400e18, 400e6, 400e6, batchMinter);
+
+        vm.prank(authorizedPooler);
+        pooler.pool(0, 0);
+    }
+
+    function test_pool_donation_pooledEventStillFires_whenDonationLessThan100() public {
+        uint256 amount = 1000e18;
+        _seedSUSDS(amount);
+        _wireDonation(25);
+
+        mockVault.setConfigurableSwapOut(250e6);
+        _fundWaUsdc(250e6);
+
+        vm.expectEmit(true, false, false, true);
+        emit BalancerPoolerV2.Pooled(authorizedPooler, 750e18, 750e18, 0);
+
+        vm.prank(authorizedPooler);
+        pooler.pool(0, 0);
+    }
+
+    function test_pool_donation_unwrapAtNonOneToOne_appliesRate() public {
+        // waUSDC redeems shares -> assets at 5000 bps (0.5 USDC per waUSDC share).
+        uint256 amount = 1000e18;
+        _seedSUSDS(amount);
+        _wireDonation(50);
+
+        // Swap returns 500e6 waUSDC, unwrap rate 5000 bps -> 250e6 USDC.
+        mockVault.setConfigurableSwapOut(500e6);
+        waUsdc.setRate(5000);
+        _fundWaUsdc(250e6);
+
+        vm.prank(authorizedPooler);
+        pooler.pool(0, 0);
+
+        assertEq(usdc.balanceOf(batchMinter), 250e6, "Final USDC reflects unwrap rate");
+    }
+
+    function test_pool_donation_settlesSUSDSForBothPhases() public {
+        uint256 amount = 1000e18;
+        _seedSUSDS(amount);
+        _wireDonation(30);
+
+        mockVault.setConfigurableSwapOut(300e6);
+        _fundWaUsdc(300e6);
+
+        vm.prank(authorizedPooler);
+        pooler.pool(0, 0);
+
+        // Two settlements expected: donation (300e18) and LP (700e18).
+        assertEq(mockVault.getSettlementsCount(), 2, "Two settlements (donation + LP)");
+        (address t0, uint256 a0) = mockVault.getSettlement(0);
+        (address t1, uint256 a1) = mockVault.getSettlement(1);
+        assertEq(t0, address(sUsds));
+        assertEq(a0, 300e18, "Donation settlement = 300e18");
+        assertEq(t1, address(sUsds));
+        assertEq(a1, 700e18, "LP settlement = 700e18");
+    }
+
+    function test_pool_donation_pauseBlocksPool() public {
+        uint256 amount = 1000e18;
+        _seedSUSDS(amount);
+        _wireDonation(30);
+        mockVault.setConfigurableSwapOut(300e6);
+        _fundWaUsdc(300e6);
+
+        vm.prank(minter);
+        pooler.pause();
+
+        vm.prank(authorizedPooler);
+        vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
+        pooler.pool(0, 0);
+
+        assertFalse(mockVault.swapCalled(), "swap must not fire when paused");
+        assertFalse(mockVault.addLiquidityCalled(), "LP must not fire when paused");
+    }
+
+    function test_pool_donation_revertsForNonAuthorizedPooler() public {
+        uint256 amount = 1000e18;
+        _seedSUSDS(amount);
+        _wireDonation(30);
+        mockVault.setConfigurableSwapOut(300e6);
+        _fundWaUsdc(300e6);
+
+        vm.prank(nonOwner);
+        vm.expectRevert("BalancerPoolerV2: caller not authorized pooler");
+        pooler.pool(0, 0);
+    }
 }
