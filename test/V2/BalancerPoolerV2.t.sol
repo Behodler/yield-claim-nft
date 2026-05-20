@@ -244,6 +244,60 @@ contract MockBalancerRouter {
     }
 }
 
+/// @dev Minimal mock of NFTMinterV2 used exclusively by the migrateMint test section.
+///      Tracks per-holder per-id balances, records mintFor calls, and exposes
+///      independently flippable authorizedBurners / authorizedMinters mappings so each
+///      revert path can be exercised in isolation.
+contract MockNFTMinterV2 {
+    mapping(address => mapping(uint256 => uint256)) public balances;
+    mapping(address => bool) public authorizedBurners;
+    mapping(address => bool) public authorizedMinters;
+
+    uint256 public mintForCallCount;
+
+    struct MintForCall {
+        uint256 index;
+        address recipient;
+        address caller;
+    }
+
+    MintForCall[] public mintForCalls;
+
+    function setAuthorizedBurner(address burner, bool authorized) external {
+        authorizedBurners[burner] = authorized;
+    }
+
+    function setAuthorizedMinter(address m, bool authorized) external {
+        authorizedMinters[m] = authorized;
+    }
+
+    function setBalance(address holder, uint256 tokenId, uint256 quantity) external {
+        balances[holder][tokenId] = quantity;
+    }
+
+    function burn(address holder, uint256 tokenId, uint256 quantity) external {
+        require(authorizedBurners[msg.sender], "NFTMinterV2: caller is not authorized burner");
+        require(balances[holder][tokenId] >= quantity, "ERC1155: insufficient balance");
+        balances[holder][tokenId] -= quantity;
+    }
+
+    function mintFor(uint256 index, address recipient) external {
+        require(authorizedMinters[msg.sender], "NFTMinterV2: caller is not authorized minter");
+        balances[recipient][index] += 1;
+        mintForCallCount += 1;
+        mintForCalls.push(MintForCall({index: index, recipient: recipient, caller: msg.sender}));
+    }
+
+    function getMintForCall(uint256 i)
+        external
+        view
+        returns (uint256 index, address recipient, address caller)
+    {
+        MintForCall memory c = mintForCalls[i];
+        return (c.index, c.recipient, c.caller);
+    }
+}
+
 contract BalancerPoolerV2Test is Test {
     BalancerPoolerV2 public pooler;
     MockERC20 public usds; // underlying prime token (USDS)
@@ -1519,5 +1573,206 @@ contract BalancerPoolerV2Test is Test {
             0,
             "mock vault internalBalance[waUsdc] should be drained after sendTo"
         );
+    }
+
+    // =========================================================================
+    // Story-033: migrateMint — id-4 -> id-6 one-shot migration
+    // =========================================================================
+
+    uint256 internal constant OLD_NFT_ID = 4;
+    uint256 internal constant NEW_NFT_INDEX = 6;
+
+    address internal migrateHolder = address(0xA0001);
+    address internal migrateRecipient = address(0xA0002);
+    address internal migrateThirdParty = address(0xA0003);
+
+    /// @dev Builds a fresh pooler wired to a MockNFTMinterV2 and configures the mock to
+    ///      authorise the pooler as both burner and minter, with `seedQuantity` of id-4
+    ///      already in the holder's balance.
+    function _setupMigrate(uint256 seedQuantity)
+        internal
+        returns (BalancerPoolerV2 freshPooler, MockNFTMinterV2 mockMinter)
+    {
+        freshPooler = new BalancerPoolerV2(
+            address(sUsds), address(bptToken), address(mockVault), address(mockRouter), true, owner
+        );
+        mockMinter = new MockNFTMinterV2();
+        freshPooler.setMinter(address(mockMinter));
+        mockMinter.setAuthorizedBurner(address(freshPooler), true);
+        mockMinter.setAuthorizedMinter(address(freshPooler), true);
+        mockMinter.setBalance(migrateHolder, OLD_NFT_ID, seedQuantity);
+    }
+
+    // ---- Case 1: Happy path, caller == recipient ----
+    function test_migrateMint_happyPath_callerEqualsRecipient() public {
+        uint256 n = 5;
+        (BalancerPoolerV2 p, MockNFTMinterV2 m) = _setupMigrate(n);
+
+        vm.prank(migrateHolder);
+        p.migrateMint(n, migrateHolder);
+
+        assertEq(m.balances(migrateHolder, OLD_NFT_ID), 0, "id-4 burned from holder");
+        assertEq(m.balances(migrateHolder, NEW_NFT_INDEX), n, "id-6 minted to holder");
+        assertEq(m.mintForCallCount(), n, "mintFor invoked exactly n times");
+        for (uint256 i; i < n; ++i) {
+            (uint256 idx, address recipient, address caller) = m.getMintForCall(i);
+            assertEq(idx, NEW_NFT_INDEX, "mintFor index = NEW_NFT_INDEX");
+            assertEq(recipient, migrateHolder, "mintFor recipient = holder");
+            assertEq(caller, address(p), "mintFor caller = pooler");
+        }
+    }
+
+    // ---- Case 2: Happy path, caller != recipient ----
+    function test_migrateMint_happyPath_callerNotRecipient() public {
+        uint256 n = 3;
+        (BalancerPoolerV2 p, MockNFTMinterV2 m) = _setupMigrate(n);
+
+        // Pre-condition: third-party currently holds zero id-4 and zero id-6.
+        assertEq(m.balances(migrateThirdParty, OLD_NFT_ID), 0);
+        assertEq(m.balances(migrateThirdParty, NEW_NFT_INDEX), 0);
+
+        vm.prank(migrateHolder);
+        p.migrateMint(n, migrateThirdParty);
+
+        // id-4 burned from msg.sender (holder), NOT from the recipient.
+        assertEq(m.balances(migrateHolder, OLD_NFT_ID), 0, "id-4 burned from caller");
+        assertEq(m.balances(migrateThirdParty, OLD_NFT_ID), 0, "recipient's id-4 untouched");
+
+        // id-6 minted to the specified recipient, NOT to the caller.
+        assertEq(m.balances(migrateRecipient, NEW_NFT_INDEX), 0, "unused address gets nothing");
+        assertEq(m.balances(migrateHolder, NEW_NFT_INDEX), 0, "caller does NOT receive id-6");
+        assertEq(m.balances(migrateThirdParty, NEW_NFT_INDEX), n, "recipient receives id-6");
+        assertEq(m.mintForCallCount(), n);
+    }
+
+    // ---- Case 3: Multi-NFT loop (N = 41, the documented worst case) ----
+    function test_migrateMint_multiNFTLoop_41() public {
+        uint256 n = 41;
+        (BalancerPoolerV2 p, MockNFTMinterV2 m) = _setupMigrate(n);
+
+        vm.prank(migrateHolder);
+        p.migrateMint(n, migrateHolder);
+
+        assertEq(m.balances(migrateHolder, OLD_NFT_ID), 0, "all 41 id-4 burned");
+        assertEq(m.balances(migrateHolder, NEW_NFT_INDEX), n, "41 id-6 minted");
+        assertEq(m.mintForCallCount(), n, "41 mintFor calls recorded");
+        // Spot-check the last recorded invocation.
+        (uint256 idx, address recipient, address caller) = m.getMintForCall(n - 1);
+        assertEq(idx, NEW_NFT_INDEX);
+        assertEq(recipient, migrateHolder);
+        assertEq(caller, address(p));
+    }
+
+    // ---- Case 4: Revert on amount == 0 ----
+    function test_migrateMint_revertsOnZeroAmount() public {
+        (BalancerPoolerV2 p,) = _setupMigrate(10);
+
+        vm.prank(migrateHolder);
+        vm.expectRevert("BalancerPoolerV2: zero migrate");
+        p.migrateMint(0, migrateHolder);
+    }
+
+    // ---- Case 5: Revert on mintRecipient == address(0) ----
+    function test_migrateMint_revertsOnZeroRecipient() public {
+        (BalancerPoolerV2 p,) = _setupMigrate(10);
+
+        vm.prank(migrateHolder);
+        vm.expectRevert("BalancerPoolerV2: zero recipient");
+        p.migrateMint(5, address(0));
+    }
+
+    // ---- Case 6: Revert when caller's id-4 balance < amount ----
+    function test_migrateMint_revertsOnInsufficientId4Balance() public {
+        (BalancerPoolerV2 p,) = _setupMigrate(3);
+
+        // Holder has 3 id-4, asks to migrate 5.
+        vm.prank(migrateHolder);
+        vm.expectRevert("ERC1155: insufficient balance");
+        p.migrateMint(5, migrateHolder);
+    }
+
+    // ---- Case 7: Revert when pooler is not in authorizedBurners ----
+    function test_migrateMint_revertsWhenPoolerNotAuthorizedBurner() public {
+        (BalancerPoolerV2 p, MockNFTMinterV2 m) = _setupMigrate(5);
+
+        // Strip burner authorisation (minter authorisation kept so we hit the burn gate first).
+        m.setAuthorizedBurner(address(p), false);
+
+        vm.prank(migrateHolder);
+        vm.expectRevert("NFTMinterV2: caller is not authorized burner");
+        p.migrateMint(2, migrateHolder);
+    }
+
+    // ---- Case 8: Revert when authorized burner but not authorized minter ----
+    function test_migrateMint_revertsWhenPoolerNotAuthorizedMinter() public {
+        (BalancerPoolerV2 p, MockNFTMinterV2 m) = _setupMigrate(5);
+
+        // Strip only the minter side; burner stays. The burn succeeds, then the first
+        // mintFor inside the loop must revert with the minter gate's revert string.
+        m.setAuthorizedMinter(address(p), false);
+
+        vm.prank(migrateHolder);
+        vm.expectRevert("NFTMinterV2: caller is not authorized minter");
+        p.migrateMint(2, migrateHolder);
+    }
+
+    // ---- Case 9: Revert when _minter is unset ----
+    function test_migrateMint_revertsWhenMinterUnset() public {
+        // Deploy a fresh pooler and DO NOT call setMinter.
+        BalancerPoolerV2 unwiredPooler = new BalancerPoolerV2(
+            address(sUsds), address(bptToken), address(mockVault), address(mockRouter), true, owner
+        );
+
+        vm.prank(migrateHolder);
+        vm.expectRevert("BalancerPoolerV2: minter unset");
+        unwiredPooler.migrateMint(1, migrateHolder);
+    }
+
+    // ---- Case 10: Pause bypass — migrateMint runs even when the pooler is paused ----
+    function test_migrateMint_runsWhenPaused() public {
+        uint256 n = 4;
+        (BalancerPoolerV2 p, MockNFTMinterV2 m) = _setupMigrate(n);
+
+        // Pause: setMinter was called with the mock NFTMinterV2 as `_minter`, and only the
+        // minter can call pause(). Pretend the mock NFTMinterV2 is invoking pause().
+        vm.prank(address(m));
+        p.pause();
+        assertTrue(p.paused(), "pooler must be paused");
+
+        // Migration still succeeds under pause.
+        vm.prank(migrateHolder);
+        p.migrateMint(n, migrateHolder);
+
+        assertEq(m.balances(migrateHolder, OLD_NFT_ID), 0, "id-4 burned even when paused");
+        assertEq(m.balances(migrateHolder, NEW_NFT_INDEX), n, "id-6 minted even when paused");
+        assertEq(m.mintForCallCount(), n);
+        assertTrue(p.paused(), "still paused after migration");
+    }
+
+    // ---- Case 11: No price-curve mutation — pool config snapshot unchanged ----
+    function test_migrateMint_doesNotMutatePoolerConfig() public {
+        uint256 n = 7;
+        (BalancerPoolerV2 p,) = _setupMigrate(n);
+
+        // The pooler's own observable state must not change as a result of migrateMint.
+        // Snapshot the public fields the existing setters/getters expose.
+        address poolBefore = p.pool();
+        address vaultBefore = p.vault();
+        address sUsdsBefore = p.sUSDS();
+        address primeBefore = p.primeToken();
+        uint256 batchSizeBefore = p.batchDonationSize();
+        address batchMinterBefore = p.batchMinter();
+        uint256 authVersionBefore = p.authVersion();
+
+        vm.prank(migrateHolder);
+        p.migrateMint(n, migrateHolder);
+
+        assertEq(p.pool(), poolBefore, "pool() unchanged");
+        assertEq(p.vault(), vaultBefore, "vault() unchanged");
+        assertEq(p.sUSDS(), sUsdsBefore, "sUSDS() unchanged");
+        assertEq(p.primeToken(), primeBefore, "primeToken() unchanged");
+        assertEq(p.batchDonationSize(), batchSizeBefore, "batchDonationSize unchanged");
+        assertEq(p.batchMinter(), batchMinterBefore, "batchMinter unchanged");
+        assertEq(p.authVersion(), authVersionBefore, "authVersion unchanged");
     }
 }

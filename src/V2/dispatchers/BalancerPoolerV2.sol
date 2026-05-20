@@ -9,6 +9,7 @@ import {ITokenDispatcherV2} from "../interfaces/ITokenDispatcherV2.sol";
 import {IBalancerVault} from "../../interfaces/balancer/IBalancerVault.sol";
 import {IBalancerRouter} from "../../interfaces/balancer/IBalancerRouter.sol";
 import {IUnlockCallback} from "../../interfaces/balancer/IUnlockCallback.sol";
+import {INFTMinterV2} from "../interfaces/INFTMinterV2.sol";
 import {
     AddLiquidityParams,
     AddLiquidityKind,
@@ -27,6 +28,16 @@ import {
 ///      and transfers the resulting USDC to a configurable batchMinter recipient.
 contract BalancerPoolerV2 is ATokenDispatcherV2, IUnlockCallback {
     using SafeERC20 for IERC20;
+
+    /// @notice Source NFT id for the one-shot id-4 -> id-6 migration. Holders of id-4
+    ///         (minted under the decommissioned BalancerPoolerV2 at dispatcher index 4)
+    ///         burn id-4 in exchange for newly minted id-6 via `migrateMint`.
+    uint256 internal constant OLD_NFT_ID = 4;
+
+    /// @notice Destination dispatcher index (and token id) for the migration. The new
+    ///         BalancerPoolerV2 deployment will be installed at dispatcher index 6 via
+    ///         `NFTMinterV2.replaceDispatcher(6, newPooler)`.
+    uint256 internal constant NEW_NFT_INDEX = 6;
 
     address internal immutable _sUSDS;
     address internal immutable _primeToken;
@@ -314,5 +325,21 @@ contract BalancerPoolerV2 is ATokenDispatcherV2, IUnlockCallback {
     function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
         require(to != address(0), "BalancerPoolerV2: zero recipient");
         IERC20(token).safeTransfer(to, amount);
+    }
+
+    /// @notice Burn `amount` of id-4 NFTs from msg.sender and mint `amount`
+    ///         of id-6 NFTs to `mintRecipient`. Does NOT advance configs[6].price
+    ///         — migrations are not price discovery; only USDS payers move the curve.
+    ///         The caller pays no fee and provides no approvals: NFTMinterV2.burn
+    ///         is authorised-burner-gated, not holder-gated.
+    function migrateMint(uint256 amount, address mintRecipient) external {
+        require(amount > 0, "BalancerPoolerV2: zero migrate");
+        require(mintRecipient != address(0), "BalancerPoolerV2: zero recipient");
+        address minter = _minter; // inherited from ATokenDispatcherV2
+        require(minter != address(0), "BalancerPoolerV2: minter unset");
+        INFTMinterV2(minter).burn(msg.sender, OLD_NFT_ID, amount);
+        for (uint256 i; i < amount; ++i) {
+            INFTMinterV2(minter).mintFor(NEW_NFT_INDEX, mintRecipient);
+        }
     }
 }
