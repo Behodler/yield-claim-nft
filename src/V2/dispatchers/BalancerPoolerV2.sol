@@ -225,6 +225,7 @@ contract BalancerPoolerV2 is ATokenDispatcherV2, IUnlockCallback {
             });
             (, , uint256 waUsdcReceived) = IBalancerVault(_vault).swap(swapParams);
             IBalancerVault(_vault).settle(IERC20(_sUSDS), donationSUSDS);
+            IBalancerVault(_vault).sendTo(IERC20(waUsdc), address(this), waUsdcReceived);
 
             // 2. Unwrap waUSDC -> USDC (ERC4626 redeem).
             uint256 usdcReceived =

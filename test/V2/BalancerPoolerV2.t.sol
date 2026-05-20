@@ -16,6 +16,7 @@ import {MockMintable} from "../mocks/MockMintable.sol";
 import {BalancerPoolerMintDebtHook} from "../../src/V2/hooks/BalancerPoolerMintDebtHook.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {MockERC4626} from "../mocks/MockERC4626.sol";
 import {MockERC4626Wrapper} from "../mocks/MockERC4626Wrapper.sol";
 
@@ -38,6 +39,17 @@ contract MockERC20 is ERC20 {
 
 /// @dev Mock Balancer Vault that implements the unlock/callback pattern.
 contract MockBalancerVault {
+    using SafeERC20 for IERC20;
+
+    /// @dev Internal-balance ledger: token => amount credited to the caller of `swap`,
+    ///      pending withdrawal via `sendTo`. Models the V3 Vault's transient accounting:
+    ///      swap credits the output token to the caller's internal balance; the caller
+    ///      must explicitly call `sendTo(tokenOut, recipient, amount)` to receive the
+    ///      ERC20 from the vault. If the production code skips `sendTo`, downstream
+    ///      operations against the dispatcher's real balance will fail — which is the
+    ///      exact regression this mock now catches.
+    mapping(address => uint256) public internalBalance;
+
     AddLiquidityParams public lastParams;
     bool public addLiquidityCalled;
 
@@ -129,12 +141,26 @@ contract MockBalancerVault {
             : (params.amountGivenRaw * swapRateBps) / 10000;
         amountCalculatedRaw = 0;
 
-        // Mint tokenOut to msg.sender (the dispatcher) — caller is expected to
-        // have already transferred tokenIn to this vault before calling swap.
-        MockERC4626Wrapper(address(params.tokenOut)).mintShares(msg.sender, amountOutRaw);
+        // Real V3 Vault behaviour: credit tokenOut to the caller's internal balance
+        // and hold the actual ERC20 inside the vault until `sendTo` is invoked.
+        // The mock keeps the shares it mints on its own balance; the caller must
+        // call `sendTo(tokenOut, recipient, amountOutRaw)` to receive them.
+        MockERC4626Wrapper(address(params.tokenOut)).mintShares(address(this), amountOutRaw);
+        internalBalance[address(params.tokenOut)] += amountOutRaw;
     }
 
-    function sendTo(IERC20, address, uint256) external pure {}
+    /// @dev Real implementation modelling the V3 Vault's `sendTo`. Debits the
+    ///      caller's internal-balance credit and transfers the held ERC20 from
+    ///      the vault to the recipient. Reverts if the caller hasn't credited
+    ///      enough via a prior `swap`.
+    function sendTo(IERC20 token, address to, uint256 amount) external {
+        require(
+            internalBalance[address(token)] >= amount,
+            "MockBalancerVault: insufficient credit"
+        );
+        internalBalance[address(token)] -= amount;
+        token.safeTransfer(to, amount);
+    }
 
     function setSwapRateBps(uint256 rateBps) external {
         swapRateBps = rateBps;
@@ -1411,5 +1437,87 @@ contract BalancerPoolerV2Test is Test {
         vm.prank(nonOwner);
         vm.expectRevert("BalancerPoolerV2: caller not authorized pooler");
         pooler.pool(0, 0);
+    }
+
+    // =========================================================================
+    // Story-032: Regression guard — mock vault credits internal ledger, not
+    //            the caller. Proves that `sendTo` is required to move tokenOut
+    //            from the vault to the recipient. If a future contributor
+    //            removes the production-side `sendTo` line, donation tests
+    //            will fail because the dispatcher's real waUSDC balance is
+    //            zero between `swap` and `sendTo`.
+    // =========================================================================
+
+    function test_mockVault_swapCreditsInternalLedger_sendToFlipsBalances() public {
+        // Configure mock vault to return a deterministic swap output.
+        usdc = new MockERC20("USD Coin", "USDC", 6);
+        waUsdc = new MockERC4626Wrapper("Wrapped Aave USDC", "waUSDC", address(usdc), 6, 10000);
+        uint256 waUsdcOut = 750e6;
+        mockVault.setConfigurableSwapOut(waUsdcOut);
+
+        // The "dispatcher" role in this test is `address(this)`. It would
+        // normally transfer sUSDS to the vault before calling swap, but the
+        // mock does not consume the input — only the output side is what we
+        // care about here.
+        VaultSwapParams memory swapParams = VaultSwapParams({
+            kind: SwapKind.EXACT_IN,
+            pool: swapPool,
+            tokenIn: IERC20(address(sUsds)),
+            tokenOut: IERC20(address(waUsdc)),
+            amountGivenRaw: 1000e18,
+            limitRaw: 0,
+            userData: ""
+        });
+
+        // 1. Swap: mock credits the internal ledger and mints shares to itself.
+        (, , uint256 returnedOut) = mockVault.swap(swapParams);
+        assertEq(returnedOut, waUsdcOut, "swap should return configured output amount");
+
+        // 2. Settle the input side (no-op on the output ledger, just for parity
+        //    with the real production flow).
+        mockVault.settle(IERC20(address(sUsds)), 1000e18);
+
+        // After swap+settle but BEFORE sendTo:
+        //   - the recipient (this test contract) holds zero waUSDC
+        //   - the mock vault holds the actual ERC20 waUSDC shares
+        //   - the mock vault's internal ledger records the owed amount
+        assertEq(
+            waUsdc.balanceOf(address(this)),
+            0,
+            "recipient must not hold waUSDC before sendTo"
+        );
+        assertEq(
+            waUsdc.balanceOf(address(mockVault)),
+            waUsdcOut,
+            "mock vault should hold the credited waUSDC shares"
+        );
+        assertEq(
+            mockVault.internalBalance(address(waUsdc)),
+            waUsdcOut,
+            "mock vault internalBalance[waUsdc] should match credited amount"
+        );
+
+        // 3. sendTo: debits the ledger and transfers the ERC20 to the recipient.
+        mockVault.sendTo(IERC20(address(waUsdc)), address(this), waUsdcOut);
+
+        // After sendTo:
+        //   - the recipient now holds the waUSDC shares
+        //   - the mock vault no longer holds them
+        //   - the internal ledger is back to zero
+        assertEq(
+            waUsdc.balanceOf(address(this)),
+            waUsdcOut,
+            "recipient should hold waUSDC after sendTo"
+        );
+        assertEq(
+            waUsdc.balanceOf(address(mockVault)),
+            0,
+            "mock vault should no longer hold waUSDC after sendTo"
+        );
+        assertEq(
+            mockVault.internalBalance(address(waUsdc)),
+            0,
+            "mock vault internalBalance[waUsdc] should be drained after sendTo"
+        );
     }
 }
