@@ -2,14 +2,10 @@
 pragma solidity ^0.8.20;
 
 import {IDispatchHook} from "../interfaces/IDispatchHook.sol";
-import {
-    IBalancerPoolerMintDebtHook
-} from "../interfaces/IBalancerPoolerMintDebtHook.sol";
+import {IBalancerPoolerMintDebtHook} from "../interfaces/IBalancerPoolerMintDebtHook.sol";
 import {IMintable} from "../../interfaces/IMintable.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {
-    ReentrancyGuard
-} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /// @title  BalancerPoolerMintDebtHook
 /// @notice `IDispatchHook` implementation that accrues a phUSD *mint debt* on every
@@ -23,12 +19,7 @@ import {
 ///         hook (plan §8b). `onDispatch` is gated to the current dispatcher so no
 ///         external caller can inflate the debt. Trust model is unchanged: the owner
 ///         is already fully trusted, so a repointable dispatcher adds no new risk.
-contract BalancerPoolerMintDebtHook is
-    IDispatchHook,
-    IBalancerPoolerMintDebtHook,
-    Ownable,
-    ReentrancyGuard
-{
+contract BalancerPoolerMintDebtHook is IDispatchHook, IBalancerPoolerMintDebtHook, Ownable, ReentrancyGuard {
     /// @notice Exclusive upper bound on `ratio`. Max settable ratio is `MAX_RATIO - 1`.
     uint8 public constant MAX_RATIO = 50;
 
@@ -52,21 +43,10 @@ contract BalancerPoolerMintDebtHook is
     uint8 public ratio;
 
     event RatioUpdated(uint8 oldRatio, uint8 newRatio);
-    event RecipientUpdated(
-        address indexed oldRecipient,
-        address indexed newRecipient
-    );
-    event DebtAccrued(
-        address indexed minter,
-        uint256 dispatchedAmount,
-        uint256 debtAdded,
-        uint256 newTotalDebt
-    );
+    event RecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
+    event DebtAccrued(address indexed minter, uint256 dispatchedAmount, uint256 debtAdded, uint256 newTotalDebt);
     event DebtPulled(address indexed recipient, uint256 amount);
-    event DispatcherUpdated(
-        address indexed oldDispatcher,
-        address indexed newDispatcher
-    );
+    event DispatcherUpdated(address indexed oldDispatcher, address indexed newDispatcher);
 
     error OnlyDispatcher();
     error OnlyOwnerOrRecipient();
@@ -74,19 +54,16 @@ contract BalancerPoolerMintDebtHook is
     error RatioTooHigh();
 
     modifier onlyOwnerOrRecipient() {
-        if (msg.sender != owner() && msg.sender != recipient)
+        if (msg.sender != owner() && msg.sender != recipient) {
             revert OnlyOwnerOrRecipient();
+        }
         _;
     }
 
     /// @param initialOwner Address granted `Ownable` ownership of the hook.
     /// @param dispatcher_  The BalancerPoolerV2 instance permitted to call `onDispatch`.
     /// @param phUSD_       The mintable phUSD token minted to `recipient` on `pull`.
-    constructor(
-        address initialOwner,
-        address dispatcher_,
-        address phUSD_
-    ) Ownable(initialOwner) {
+    constructor(address initialOwner, address dispatcher_, address phUSD_) Ownable(initialOwner) {
         require(dispatcher_ != address(0), "dispatcher=0");
         require(phUSD_ != address(0), "phUSD=0");
         dispatcher = dispatcher_;
@@ -129,11 +106,7 @@ contract BalancerPoolerMintDebtHook is
     /// @dev Gated to `dispatcher` to prevent unbounded phUSD debt inflation by
     ///      arbitrary callers. Silent no-op when `added == 0` (zero ratio or
     ///      small-amount rounding) so the debt ledger never emits empty events.
-    function onDispatch(
-        address minter,
-        uint256 amount,
-        bytes calldata
-    ) external {
+    function onDispatch(address minter, uint256 amount, bytes calldata) external {
         if (msg.sender != dispatcher) revert OnlyDispatcher();
         uint256 added = (amount * ratio) / 100;
         if (added == 0) return;
