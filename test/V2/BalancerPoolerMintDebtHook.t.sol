@@ -36,6 +36,10 @@ contract BalancerPoolerMintDebtHookTest is Test {
         uint256 newTotalDebt
     );
     event DebtPulled(address indexed recipient, uint256 amount);
+    event DispatcherUpdated(
+        address indexed oldDispatcher,
+        address indexed newDispatcher
+    );
 
     function setUp() public {
         phUSD = new MockMintable();
@@ -94,6 +98,74 @@ contract BalancerPoolerMintDebtHookTest is Test {
             address(phUSD)
         );
         assertEq(h.owner(), newOwner, "owner should be initialOwner");
+    }
+
+    // =========================================================================
+    // setDispatcher (§8b — dispatcher is mutable, owner-repointable)
+    // =========================================================================
+
+    function test_setDispatcher_revertsForNonOwner() public {
+        vm.prank(nonOwner);
+        vm.expectRevert(
+            abi.encodeWithSignature(
+                "OwnableUnauthorizedAccount(address)",
+                nonOwner
+            )
+        );
+        hookContract.setDispatcher(address(0xDEAD));
+    }
+
+    function test_setDispatcher_revertsOnZeroAddress() public {
+        vm.expectRevert("dispatcher=0");
+        hookContract.setDispatcher(address(0));
+    }
+
+    function test_setDispatcher_updatesStorageAndEmits() public {
+        address newDispatcher = address(0xDEAD);
+        vm.expectEmit(true, true, false, false);
+        emit DispatcherUpdated(dispatcher, newDispatcher);
+        hookContract.setDispatcher(newDispatcher);
+        assertEq(
+            hookContract.dispatcher(),
+            newDispatcher,
+            "dispatcher should be updated"
+        );
+    }
+
+    function test_setDispatcher_updatesOnDispatchGate() public {
+        address newDispatcher = address(0xDEAD);
+        hookContract.setDispatcher(newDispatcher);
+
+        // Old dispatcher can no longer call onDispatch.
+        vm.prank(dispatcher);
+        vm.expectRevert(BalancerPoolerMintDebtHook.OnlyDispatcher.selector);
+        hookContract.onDispatch(minter, 1000, "");
+
+        // New dispatcher can.
+        vm.prank(newDispatcher);
+        hookContract.onDispatch(minter, 1000, "");
+        assertEq(
+            hookContract.mintDebt(),
+            500,
+            "new dispatcher should accrue debt on gross amount"
+        );
+    }
+
+    function test_setDispatcher_debtAccruesOnGrossAmount() public {
+        // §8a-req-3: debt accrues on the GROSS dispatched amount regardless of
+        // any donation carve-out. The hook only ever sees `amount` passed by the
+        // dispatcher, so accrual is always ratio% of the full amount.
+        address newDispatcher = address(0xDEAD);
+        hookContract.setDispatcher(newDispatcher);
+
+        uint256 grossAmount = 1000;
+        vm.prank(newDispatcher);
+        hookContract.onDispatch(minter, grossAmount, "");
+        assertEq(
+            hookContract.mintDebt(),
+            (grossAmount * 50) / 100,
+            "debt must be ratio% of gross amount"
+        );
     }
 
     // =========================================================================

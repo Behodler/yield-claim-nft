@@ -17,9 +17,12 @@ import {
 ///         `ratio`% of the USDS `amount` forwarded by the dispatcher. A later
 ///         call to `pull()` by the owner or the configured `recipient` realises
 ///         the debt by minting phUSD to `recipient` and zeroing the ledger.
-/// @dev    `dispatcher` is immutable — set in the constructor to the already-live
-///         `BalancerPoolerV2` that will call `onDispatch`. `onDispatch` is gated
-///         to this dispatcher so no external caller can inflate the debt.
+/// @dev    `dispatcher` is mutable storage — seeded in the constructor to the
+///         live `BalancerPoolerV2` that will call `onDispatch`, and owner-repointable
+///         via `setDispatcher` so a future pooler swap does not require redeploying the
+///         hook (plan §8b). `onDispatch` is gated to the current dispatcher so no
+///         external caller can inflate the debt. Trust model is unchanged: the owner
+///         is already fully trusted, so a repointable dispatcher adds no new risk.
 contract BalancerPoolerMintDebtHook is
     IDispatchHook,
     IBalancerPoolerMintDebtHook,
@@ -32,8 +35,9 @@ contract BalancerPoolerMintDebtHook is
     /// @notice Default ratio applied when the hook is first deployed (50%).
     uint8 public constant DEFAULT_RATIO = 50;
 
-    /// @notice The dispatcher permitted to call `onDispatch`. Immutable.
-    address public immutable dispatcher;
+    /// @notice The dispatcher permitted to call `onDispatch`. Owner-repointable
+    ///         via `setDispatcher` (plan §8b) so future pooler swaps reuse this hook.
+    address public dispatcher;
 
     /// @notice The phUSD (or compatible) mintable token. Immutable.
     IMintable public immutable phUSD;
@@ -59,6 +63,10 @@ contract BalancerPoolerMintDebtHook is
         uint256 newTotalDebt
     );
     event DebtPulled(address indexed recipient, uint256 amount);
+    event DispatcherUpdated(
+        address indexed oldDispatcher,
+        address indexed newDispatcher
+    );
 
     error OnlyDispatcher();
     error OnlyOwnerOrRecipient();
@@ -103,6 +111,18 @@ contract BalancerPoolerMintDebtHook is
         address old = recipient;
         recipient = newRecipient;
         emit RecipientUpdated(old, newRecipient);
+    }
+
+    /// @notice Repoint the dispatcher permitted to call `onDispatch`. Only owner.
+    /// @dev    Lets a future pooler swap reuse this hook without a redeploy (plan §8b).
+    ///         Operationally, `pull()` the outstanding `mintDebt` before repointing so
+    ///         the ledger is clean across the swap. Trust model unchanged (owner-only).
+    /// @param  newDispatcher The replacement dispatcher. Must be non-zero.
+    function setDispatcher(address newDispatcher) external onlyOwner {
+        require(newDispatcher != address(0), "dispatcher=0");
+        address old = dispatcher;
+        dispatcher = newDispatcher;
+        emit DispatcherUpdated(old, newDispatcher);
     }
 
     /// @inheritdoc IDispatchHook
