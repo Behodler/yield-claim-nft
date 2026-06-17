@@ -387,6 +387,20 @@ contract NudgeRatchetMintDebtHookTest is Test {
     }
 
     // =========================================================================
+    // hookTypeId marker (Audit M-04)
+    // =========================================================================
+
+    /// @dev hookTypeId() returns the keccak literal and matches the public HOOK_TYPE_ID
+    ///      constant. NudgeRatchet duplicates the same literal as EXPECTED_HOOK_TYPE_ID;
+    ///      if this literal drifts, the dispatch-path guard would reject the real hook.
+    function test_hookTypeId_returnsKeccakLiteral_andMatchesConstant() public view {
+        bytes32 expected = keccak256("NudgeRatchetMintDebtHook.v1");
+        assertEq(hookContract.hookTypeId(), expected, "hookTypeId() must equal the keccak literal");
+        assertEq(hookContract.HOOK_TYPE_ID(), expected, "HOOK_TYPE_ID constant must equal the keccak literal");
+        assertEq(hookContract.hookTypeId(), hookContract.HOOK_TYPE_ID(), "hookTypeId() must equal HOOK_TYPE_ID");
+    }
+
+    // =========================================================================
     // Wiring / integration: NudgeRatchet + NudgeRatchetMintDebtHook
     // =========================================================================
 

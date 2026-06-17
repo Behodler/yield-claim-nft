@@ -6,6 +6,7 @@ import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IER
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ATokenDispatcherV2} from "./ATokenDispatcherV2.sol";
 import {ITokenDispatcherV2} from "../interfaces/ITokenDispatcherV2.sol";
+import {INudgeRatchetMintDebtHook} from "../interfaces/INudgeRatchetMintDebtHook.sol";
 
 /// @title NudgeRatchet
 /// @notice A V2 token dispatcher that forwards its USDC token to an owner-settable
@@ -23,6 +24,11 @@ contract NudgeRatchet is ATokenDispatcherV2 {
 
     /// @notice Owner-settable nudge-reward sink that receives forwarded USDC.
     address public batchMinter;
+
+    /// @dev Must equal NudgeRatchetMintDebtHook.HOOK_TYPE_ID. Kept as a local
+    ///      constant (rather than importing) to avoid a hard dependency cycle;
+    ///      both derive from the same literal string and must stay in sync. (Audit M-04)
+    bytes32 private constant EXPECTED_HOOK_TYPE_ID = keccak256("NudgeRatchetMintDebtHook.v1");
 
     /// @notice Emitted when the batchMinter address is updated.
     event BatchMinterUpdated(address indexed oldBatchMinter, address indexed newBatchMinter);
@@ -57,6 +63,12 @@ contract NudgeRatchet is ATokenDispatcherV2 {
     /// @notice Forwards tokens (already on this contract) to the batchMinter.
     /// @param amount The FOT-adjusted amount of token to forward.
     function _dispatch(address, uint256 amount, bytes calldata /* extraData */) internal override {
+        // Audit M-04: refuse to dispatch through a missing/wrong hook. A no-op or
+        // unrelated hook lacks hookTypeId(), so this call reverts loudly.
+        require(
+            INudgeRatchetMintDebtHook(address(hook)).hookTypeId() == EXPECTED_HOOK_TYPE_ID,
+            "NudgeRatchet: hook is not NudgeRatchetMintDebtHook"
+        );
         IERC20(_token).safeTransfer(batchMinter, amount);
     }
 }

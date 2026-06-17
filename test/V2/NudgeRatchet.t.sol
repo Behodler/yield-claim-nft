@@ -5,9 +5,11 @@ import {Test} from "forge-std/Test.sol";
 import {NudgeRatchet} from "../../src/V2/dispatchers/NudgeRatchet.sol";
 import {NFTMinterV2} from "../../src/V2/NFTMinterV2.sol";
 import {IDispatchHook} from "../../src/V2/interfaces/IDispatchHook.sol";
+import {NudgeRatchetMintDebtHook} from "../../src/V2/hooks/NudgeRatchetMintDebtHook.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {MockDispatchHook} from "../mocks/MockDispatchHook.sol";
+import {MockMintable} from "../mocks/MockMintable.sol";
 
 /// @dev USDC-like 6-decimal mock ERC20 for NudgeRatchet tests.
 contract MockUSDC is ERC20 {
@@ -34,6 +36,8 @@ contract Mock18Decimals is ERC20 {
 contract NudgeRatchetTest is Test {
     NudgeRatchet public ratchet;
     MockUSDC public usdc;
+    NudgeRatchetMintDebtHook public mintDebtHook;
+    MockMintable public phUSD;
 
     address public owner = address(this);
     address public minter = address(0xABCDEF);
@@ -42,6 +46,13 @@ contract NudgeRatchetTest is Test {
     function setUp() public {
         usdc = new MockUSDC();
         ratchet = new NudgeRatchet(address(usdc), batchMinterAddr, owner);
+
+        // Audit M-04: NudgeRatchet asserts its hook is a real NudgeRatchetMintDebtHook
+        // on every dispatch. Install one so the dispatch path is valid in tests.
+        phUSD = new MockMintable();
+        mintDebtHook = new NudgeRatchetMintDebtHook(owner, address(ratchet), address(phUSD));
+        ratchet.setHook(IDispatchHook(address(mintDebtHook)));
+
         ratchet.setMinter(minter);
     }
 
@@ -70,6 +81,64 @@ contract NudgeRatchetTest is Test {
 
         assertEq(usdc.balanceOf(batchMinterAddr), amount, "batchMinter should have received the tokens");
         assertEq(usdc.balanceOf(address(ratchet)), 0, "ratchet should have 0 balance after forwarding");
+        // Audit M-04: with a real hook installed, phUSD mint-debt accrues (100% default ratio,
+        // scaled 6->18 dp). This is the path that silently accrued no debt before the guard.
+        assertEq(mintDebtHook.mintDebt(), amount * 1e12, "phUSD mint-debt should accrue at default ratio");
+    }
+
+    // -------------------------------------------------------------------------
+    // Audit M-04: hookTypeId() marker guard in _dispatch
+    // -------------------------------------------------------------------------
+
+    /// @dev Dispatch succeeds and accrues debt when the installed hook is a real
+    ///      NudgeRatchetMintDebtHook (installed in setUp). Also guards against keccak
+    ///      literal drift between the hook's HOOK_TYPE_ID and NudgeRatchet's expected id:
+    ///      if they diverged the require would revert and no debt would accrue.
+    function test_dispatch_succeedsWithRealHook_andAccruesDebt() public {
+        uint256 amount = 250e6;
+        usdc.mint(address(ratchet), amount);
+
+        vm.prank(minter);
+        ratchet.dispatch(minter, amount, "");
+
+        assertEq(usdc.balanceOf(batchMinterAddr), amount, "USDC forwarded to batchMinter");
+        assertEq(mintDebtHook.mintDebt(), amount * 1e12, "mint-debt accrued through the real hook");
+        // Sanity: the literals must match for the dispatch above to have succeeded.
+        assertEq(
+            mintDebtHook.HOOK_TYPE_ID(),
+            keccak256("NudgeRatchetMintDebtHook.v1"),
+            "HOOK_TYPE_ID must match the shared literal"
+        );
+    }
+
+    /// @dev The "forgot to call setHook" case: with the constructor-default
+    ///      DefaultDispatchHook (which lacks hookTypeId()), dispatch must revert.
+    function test_dispatch_revertsWithDefaultHook() public {
+        // Fresh ratchet whose hook is still the constructor-default DefaultDispatchHook.
+        NudgeRatchet freshRatchet = new NudgeRatchet(address(usdc), batchMinterAddr, owner);
+        freshRatchet.setMinter(minter);
+
+        uint256 amount = 100e6;
+        usdc.mint(address(freshRatchet), amount);
+
+        vm.prank(minter);
+        vm.expectRevert();
+        freshRatchet.dispatch(minter, amount, "");
+    }
+
+    /// @dev Any other IDispatchHook lacking the marker (e.g. MockDispatchHook) also reverts.
+    function test_dispatch_revertsWithWrongHook() public {
+        NudgeRatchet freshRatchet = new NudgeRatchet(address(usdc), batchMinterAddr, owner);
+        MockDispatchHook wrongHook = new MockDispatchHook();
+        freshRatchet.setHook(IDispatchHook(address(wrongHook)));
+        freshRatchet.setMinter(minter);
+
+        uint256 amount = 100e6;
+        usdc.mint(address(freshRatchet), amount);
+
+        vm.prank(minter);
+        vm.expectRevert();
+        freshRatchet.dispatch(minter, amount, "");
     }
 
     function test_dispatch_revertsWhenPaused() public {
@@ -93,10 +162,10 @@ contract NudgeRatchetTest is Test {
         ratchet.dispatch(address(0xDEAD), amount, "");
     }
 
+    /// @dev With the M-04 guard, NudgeRatchet only accepts a NudgeRatchetMintDebtHook.
+    ///      Verify the forwarded `amount` reaches the real hook by asserting the accrued
+    ///      mint-debt corresponds to it (arbitrary extraData is ignored by the hook).
     function test_dispatch_invokesHookWithForwardedArgs() public {
-        MockDispatchHook hook = new MockDispatchHook();
-        ratchet.setHook(IDispatchHook(address(hook)));
-
         uint256 amount = 100e6;
         bytes memory payload = hex"cafebabe";
         usdc.mint(address(ratchet), amount);
@@ -104,10 +173,8 @@ contract NudgeRatchetTest is Test {
         vm.prank(minter);
         ratchet.dispatch(minter, amount, payload);
 
-        assertEq(hook.callCount(), 1, "hook should be called once");
-        assertEq(hook.lastMinter(), minter, "hook should receive minter");
-        assertEq(hook.lastAmount(), amount, "hook should receive amount");
-        assertEq(hook.lastExtraData(), payload, "hook should receive extraData verbatim");
+        // Debt accrual proves onDispatch ran with the forwarded amount (default ratio 100%).
+        assertEq(mintDebtHook.mintDebt(), amount * 1e12, "real hook should accrue debt for forwarded amount");
     }
 
     // =========================================================================
@@ -157,6 +224,11 @@ contract NudgeRatchetTest is Test {
     // Integration test: NFTMinterV2 -> NudgeRatchet -> batchMinter
     // =========================================================================
 
+    /// @dev Audit M-04 smoking gun: previously this exercised dispatch through the
+    ///      constructor-default no-op hook and asserted ONLY the USDC flow, so the
+    ///      silent zero-debt path passed undetected. The real NudgeRatchetMintDebtHook
+    ///      is now installed (in setUp) and we assert phUSD mint-debt accrues, so the
+    ///      unwired zero-debt path can no longer pass silently.
     function test_integration_mintNFTWithNudgeRatchetDispatcher() public {
         NFTMinterV2 nftMinter = new NFTMinterV2(owner);
 
@@ -179,5 +251,9 @@ contract NudgeRatchetTest is Test {
         assertEq(usdc.balanceOf(address(nftMinter)), 0, "NFTMinterV2 should have 0 balance");
         assertEq(usdc.balanceOf(address(ratchet)), 0, "NudgeRatchet should have 0 balance");
         assertEq(nftMinter.balanceOf(nftRecipient, 1), 1, "NFT recipient should have 1 claim NFT");
+        // Audit M-04: phUSD mint-debt must accrue for the 10e6 USDC dispatched
+        // (default ratio 100%, scaled 6->18 dp). This assertion would have failed
+        // under the old no-op default hook, exposing the zero-debt leak.
+        assertEq(mintDebtHook.mintDebt(), 10e6 * 1e12, "phUSD mint-debt should accrue for the dispatched USDC");
     }
 }

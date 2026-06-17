@@ -27,6 +27,9 @@ contract NudgeRatchetMintDebtHook is IDispatchHook, INudgeRatchetMintDebtHook, O
     /// @notice Default ratio applied when the hook is first deployed (100%).
     uint8 public constant DEFAULT_RATIO = 100;
 
+    /// @notice Unique identity marker for this hook type. (Audit M-04)
+    bytes32 public constant HOOK_TYPE_ID = keccak256("NudgeRatchetMintDebtHook.v1");
+
     /// @dev USDC has 6 decimals; phUSD has 18. `mintDebt` is denominated in phUSD wei,
     ///      so the 6-decimal dispatched amount is scaled up by `10**(18-6) = 1e12`.
     ///      Mirrors `ISkyPSM.to18ConversionFactor()` (`1e12` for 6-decimal USDC). The
@@ -137,5 +140,10 @@ contract NudgeRatchetMintDebtHook is IDispatchHook, INudgeRatchetMintDebtHook, O
         mintDebt = 0;
         phUSD.mint(recipient, debt);
         emit DebtPulled(recipient, debt);
+    }
+
+    /// @inheritdoc INudgeRatchetMintDebtHook
+    function hookTypeId() external pure returns (bytes32) {
+        return HOOK_TYPE_ID;
     }
 }
