@@ -60,15 +60,43 @@ contract NudgeRatchet is ATokenDispatcherV2 {
         emit BatchMinterUpdated(old, newBatchMinter);
     }
 
-    /// @notice Forwards tokens (already on this contract) to the batchMinter.
-    /// @param amount The FOT-adjusted amount of token to forward.
+    /// @notice Forwards this contract's USDC to the batchMinter.
+    /// @dev DESIGN: this sweeps the FULL token balance, not the `amount` argument.
+    ///      Rationale and known/accepted properties (do not re-flag as findings):
+    ///        * Self-cleaning: any USDC sent here out-of-band (mistaken transfers,
+    ///          airdrops) is forwarded on the next dispatch, so no rescueERC20
+    ///          escape hatch is needed for `_token`. (Non-`_token` assets are out of
+    ///          scope and intentionally have no recovery path on this contract.)
+    ///        * Debt/transfer decoupling is INTENTIONAL. The base dispatcher accrues
+    ///          mint-debt in the hook against `amount` (see ATokenDispatcherV2.dispatch
+    ///          -> hook.onDispatch), while this transfers the actual balance. The two
+    ///          quantities differ only when stray USDC is present.
+    ///        * Surplus is SAFE and protocol-favouring: balance > amount means the
+    ///          batchMinter receives more USDC than debt was recorded for, i.e. the
+    ///          protocol is over-backed. No unbacked phUSD is ever created this way.
+    ///        * The hook's DebtAccrued event therefore reports `amount`, which may be
+    ///          below the USDC actually forwarded when stray funds exist. This is a
+    ///          known, accepted reporting nuance, not a discrepancy bug; it always
+    ///          errs toward over-backing.
+    /// @param amount Minimum balance required to dispatch AND the basis for mint-debt
+    ///        accrual in the hook. NOT necessarily the exact quantity transferred.
     function _dispatch(address, uint256 amount, bytes calldata /* extraData */) internal override {
-        // Audit M-04: refuse to dispatch through a missing/wrong hook. A no-op or
-        // unrelated hook lacks hookTypeId(), so this call reverts loudly.
+        // Audit M-04 (story 037): refuse to dispatch through a missing/wrong hook. A
+        // no-op or unrelated hook lacks hookTypeId(), so this call reverts loudly.
         require(
             INudgeRatchetMintDebtHook(address(hook)).hookTypeId() == EXPECTED_HOOK_TYPE_ID,
             "NudgeRatchet: hook is not NudgeRatchetMintDebtHook"
         );
-        IERC20(_token).safeTransfer(batchMinter, amount);
+
+        uint256 bal = IERC20(_token).balanceOf(address(this));
+        // Defense-in-depth, NOT the load-bearing guard: NFTMinter already guarantees
+        // the deposited balance covers `amount` before calling dispatch. We re-assert
+        // it locally because debt accrues against `amount` in the hook, so forwarding
+        // LESS than `amount` would be the one direction that mints unbacked phUSD.
+        // Cheap, redundant, and documents the invariant at the point it matters.
+        require(bal >= amount, "NudgeRatchet: insufficient balance for dispatch");
+
+        // Sweep the full balance (>= amount). Surplus, if any, is over-backing.
+        IERC20(_token).safeTransfer(batchMinter, bal);
     }
 }

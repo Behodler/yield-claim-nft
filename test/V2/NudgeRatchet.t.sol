@@ -86,6 +86,41 @@ contract NudgeRatchetTest is Test {
         assertEq(mintDebtHook.mintDebt(), amount * 1e12, "phUSD mint-debt should accrue at default ratio");
     }
 
+    /// @dev Story 038: _dispatch sweeps the FULL token balance, not the `amount`
+    ///      argument. With stray USDC present (balance > amount), the entire balance
+    ///      is forwarded to batchMinter, the ratchet is left at 0, and mint-debt
+    ///      accrues against `amount` ONLY (the surplus is protocol-favouring over-backing).
+    function test_dispatch_sweepsFullBalanceWhenStrayTokensPresent() public {
+        uint256 amount = 100e6;
+        uint256 stray = 30e6;
+        // Deposit the honest amount plus stray USDC sent out-of-band.
+        usdc.mint(address(ratchet), amount + stray);
+
+        vm.prank(minter);
+        ratchet.dispatch(minter, amount, "");
+
+        assertEq(
+            usdc.balanceOf(batchMinterAddr),
+            amount + stray,
+            "batchMinter should receive the FULL swept balance, not just amount"
+        );
+        assertEq(usdc.balanceOf(address(ratchet)), 0, "ratchet should be swept to 0 balance");
+        // Debt accrues against `amount` only (scaled 6->18 dp), NOT the swept balance.
+        assertEq(mintDebtHook.mintDebt(), amount * 1e12, "mint-debt should accrue against amount only");
+    }
+
+    /// @dev Story 038: defense-in-depth guard. If the contract holds less than `amount`,
+    ///      dispatch reverts so unbacked phUSD can never accrue in the hook.
+    function test_dispatch_revertsWhenBalanceBelowAmount() public {
+        uint256 amount = 100e6;
+        // Contract holds strictly less than the claimed amount.
+        usdc.mint(address(ratchet), amount - 1);
+
+        vm.prank(minter);
+        vm.expectRevert("NudgeRatchet: insufficient balance for dispatch");
+        ratchet.dispatch(minter, amount, "");
+    }
+
     // -------------------------------------------------------------------------
     // Audit M-04: hookTypeId() marker guard in _dispatch
     // -------------------------------------------------------------------------
