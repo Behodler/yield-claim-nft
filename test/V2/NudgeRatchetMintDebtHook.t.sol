@@ -114,10 +114,10 @@ contract NudgeRatchetMintDebtHookTest is Test {
         vm.expectRevert(NudgeRatchetMintDebtHook.OnlyDispatcher.selector);
         hookContract.onDispatch(minter, 1000, "");
 
-        // New dispatcher can; at default ratio 100, debt == amount.
+        // New dispatcher can; at default ratio 100, debt == amount scaled 6->18 dp.
         vm.prank(newDispatcher);
         hookContract.onDispatch(minter, 1000, "");
-        assertEq(hookContract.mintDebt(), 1000, "new dispatcher should accrue debt at 100%");
+        assertEq(hookContract.mintDebt(), 1000 * 1e12, "new dispatcher should accrue debt at 100%");
     }
 
     // =========================================================================
@@ -196,7 +196,7 @@ contract NudgeRatchetMintDebtHookTest is Test {
 
     function test_onDispatch_accruesDebt_defaultRatio_equalsAmount() public {
         uint256 amount = 1000;
-        uint256 expectedAdded = 1000; // 100% of 1000
+        uint256 expectedAdded = 1000 * 1e12; // 100% of 1000, scaled 6->18 dp
 
         vm.expectEmit(true, false, false, true);
         emit DebtAccrued(minter, amount, expectedAdded, expectedAdded);
@@ -204,14 +204,14 @@ contract NudgeRatchetMintDebtHookTest is Test {
         vm.prank(dispatcher);
         hookContract.onDispatch(minter, amount, "");
 
-        assertEq(hookContract.mintDebt(), expectedAdded, "mintDebt should equal amount at default 100%");
+        assertEq(hookContract.mintDebt(), expectedAdded, "mintDebt should equal scaled amount at default 100%");
     }
 
     function test_onDispatch_accruesDebt_maxRatio_doublesAmount() public {
         hookContract.setRatio(200);
         vm.prank(dispatcher);
         hookContract.onDispatch(minter, 1000, "");
-        assertEq(hookContract.mintDebt(), 2000, "mintDebt should be 2x amount at 200%");
+        assertEq(hookContract.mintDebt(), 2000 * 1e12, "mintDebt should be 2x scaled amount at 200%");
     }
 
     function test_onDispatch_multipleCallsAccumulate() public {
@@ -219,7 +219,39 @@ contract NudgeRatchetMintDebtHookTest is Test {
         hookContract.onDispatch(minter, 1000, "");
         vm.prank(dispatcher);
         hookContract.onDispatch(minter, 1000, "");
-        assertEq(hookContract.mintDebt(), 2000, "mintDebt should accumulate to 2000");
+        assertEq(hookContract.mintDebt(), 2000 * 1e12, "mintDebt should accumulate to scaled 2000");
+    }
+
+    // -------------------------------------------------------------------------
+    // onDispatch: explicit 6->18 decimal scaling (USDC -> phUSD)
+    // -------------------------------------------------------------------------
+
+    function test_onDispatch_scales1USDCToOnePhUSDAt100Pct() public {
+        // 1 USDC (1e6) at ratio 100% accrues exactly 1 phUSD (1e18).
+        uint256 amount = 1e6;
+        uint256 expected = 1e18;
+
+        vm.expectEmit(true, false, false, true);
+        emit DebtAccrued(minter, amount, expected, expected);
+
+        vm.prank(dispatcher);
+        hookContract.onDispatch(minter, amount, "");
+
+        assertEq(hookContract.mintDebt(), expected, "1 USDC -> 1 phUSD debt at 100%");
+    }
+
+    function test_onDispatch_scalesWithRatio_100USDC() public {
+        // 100 USDC (100e6) at ratio 200% -> 200 phUSD (200e18).
+        hookContract.setRatio(200);
+        vm.prank(dispatcher);
+        hookContract.onDispatch(minter, 100e6, "");
+        assertEq(hookContract.mintDebt(), 200e18, "100 USDC at 200% -> 200 phUSD");
+
+        // Fresh hook at ratio 100% -> 100 phUSD (100e18).
+        NudgeRatchetMintDebtHook h = new NudgeRatchetMintDebtHook(owner, dispatcher, address(phUSD));
+        vm.prank(dispatcher);
+        h.onDispatch(minter, 100e6, "");
+        assertEq(h.mintDebt(), 100e18, "100 USDC at 100% -> 100 phUSD");
     }
 
     function test_onDispatch_zeroRatio_noDebt_noEvent() public {
@@ -234,16 +266,15 @@ contract NudgeRatchetMintDebtHookTest is Test {
         assertEq(hookContract.mintDebt(), 0, "mintDebt should remain 0");
     }
 
-    function test_onDispatch_smallAmountRoundingToZero_noEvent() public {
-        // With ratio=100, amount must be 0 to round added to 0; use a tiny ratio to
-        // exercise the rounding no-op path: ratio=1, amount=99 -> (99*1)/100 = 0.
-        hookContract.setRatio(1);
+    function test_onDispatch_zeroAmount_noDebt_noEvent() public {
+        // Post 1e12-scaling, the only way `added` rounds to 0 (besides ratio=0) is amount=0:
+        // `(0 * 1e12 * ratio) / 100 == 0`. This exercises the `added == 0` no-op guard.
         vm.recordLogs();
         vm.prank(dispatcher);
-        hookContract.onDispatch(minter, 99, "");
+        hookContract.onDispatch(minter, 0, "");
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
-        assertEq(logs.length, 0, "no events on zero-added rounding case");
+        assertEq(logs.length, 0, "no events on zero-added case");
         assertEq(hookContract.mintDebt(), 0, "mintDebt should remain 0");
     }
 
@@ -251,7 +282,7 @@ contract NudgeRatchetMintDebtHookTest is Test {
         bytes memory payload = hex"deadbeef1234";
         vm.prank(dispatcher);
         hookContract.onDispatch(minter, 1000, payload);
-        assertEq(hookContract.mintDebt(), 1000, "mintDebt should still be 1000");
+        assertEq(hookContract.mintDebt(), 1000 * 1e12, "mintDebt should still be scaled 1000");
     }
 
     // =========================================================================
@@ -278,19 +309,22 @@ contract NudgeRatchetMintDebtHookTest is Test {
 
     function test_pull_ownerCanPull_mintsToRecipient() public {
         hookContract.setRecipient(recipient);
+        // 1000 USDC base units at ratio 100% -> 1000 * 1e12 phUSD wei debt.
+        uint256 amount = 1000;
+        uint256 expectedMint = amount * 1e12; // amount * 1e12 * 100 / 100
         vm.prank(dispatcher);
-        hookContract.onDispatch(minter, 1000, "");
+        hookContract.onDispatch(minter, amount, "");
 
         vm.expectEmit(true, false, false, true);
-        emit DebtPulled(recipient, 1000);
+        emit DebtPulled(recipient, expectedMint);
         hookContract.pull(); // owner = address(this)
 
         assertEq(hookContract.mintDebt(), 0, "mintDebt should be zero after pull");
-        assertEq(phUSD.balanceOf(recipient), 1000, "phUSD should have been minted to recipient");
+        assertEq(phUSD.balanceOf(recipient), expectedMint, "scaled phUSD should have been minted to recipient");
         assertEq(phUSD.mintCallCount(), 1, "exactly one mint call");
         (address r, uint256 a) = phUSD.lastMint();
         assertEq(r, recipient, "mint recipient");
-        assertEq(a, 1000, "mint amount");
+        assertEq(a, expectedMint, "mint amount is scaled phUSD debt, not raw USDC");
     }
 
     function test_pull_recipientCanPull() public {
@@ -302,7 +336,22 @@ contract NudgeRatchetMintDebtHookTest is Test {
         hookContract.pull();
 
         assertEq(hookContract.mintDebt(), 0, "mintDebt cleared");
-        assertEq(phUSD.balanceOf(recipient), 1000, "phUSD minted");
+        assertEq(phUSD.balanceOf(recipient), 1000 * 1e12, "scaled phUSD minted");
+    }
+
+    function test_pull_mintsScaledDebtAtMaxRatio() public {
+        // Proves minted phUSD == amount * 1e12 * ratio / 100, not the raw USDC figure.
+        hookContract.setRecipient(recipient);
+        hookContract.setRatio(200);
+        uint256 amount = 100e6; // 100 USDC
+        uint256 expectedMint = amount * 1e12 * 200 / 100; // 200e18
+
+        vm.prank(dispatcher);
+        hookContract.onDispatch(minter, amount, "");
+
+        hookContract.pull();
+        assertEq(phUSD.balanceOf(recipient), expectedMint, "minted phUSD == scaled debt at 200%");
+        assertEq(expectedMint, 200e18, "sanity: 100 USDC at 200% -> 200 phUSD");
     }
 
     function test_pull_noOpWhenDebtIsZero_afterRecipientSet() public {
@@ -363,7 +412,7 @@ contract NudgeRatchetMintDebtHookTest is Test {
         assertEq(usdc.balanceOf(batchMinterAddr), amount, "USDC should be forwarded to batchMinter");
         assertEq(usdc.balanceOf(address(ratchet)), 0, "ratchet should hold no USDC");
 
-        // Debt accrued at default ratio 100% == amount.
-        assertEq(hook.mintDebt(), amount, "mintDebt should equal amount at default ratio 100%");
+        // Debt accrued at default ratio 100%, scaled 6->18 dp: 500e6 USDC -> 500e18 phUSD.
+        assertEq(hook.mintDebt(), amount * 1e12, "mintDebt should equal scaled amount at default ratio 100%");
     }
 }

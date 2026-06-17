@@ -27,6 +27,13 @@ contract NudgeRatchetMintDebtHook is IDispatchHook, INudgeRatchetMintDebtHook, O
     /// @notice Default ratio applied when the hook is first deployed (100%).
     uint8 public constant DEFAULT_RATIO = 100;
 
+    /// @dev USDC has 6 decimals; phUSD has 18. `mintDebt` is denominated in phUSD wei,
+    ///      so the 6-decimal dispatched amount is scaled up by `10**(18-6) = 1e12`.
+    ///      Mirrors `ISkyPSM.to18ConversionFactor()` (`1e12` for 6-decimal USDC). The
+    ///      scale is a fixed constant because `NudgeRatchet` hard-guards its token to
+    ///      exactly 6 decimals at deploy and phUSD is the protocol's own 18-decimal token.
+    uint256 internal constant USDC_TO_PHUSD_SCALE = 1e12;
+
     /// @notice The dispatcher permitted to call `onDispatch`. Owner-repointable
     ///         via `setDispatcher` so future dispatcher swaps reuse this hook.
     address public dispatcher;
@@ -111,7 +118,10 @@ contract NudgeRatchetMintDebtHook is IDispatchHook, INudgeRatchetMintDebtHook, O
     ///      small-amount rounding) so the debt ledger never emits empty events.
     function onDispatch(address minter, uint256 amount, bytes calldata) external {
         if (msg.sender != dispatcher) revert OnlyDispatcher();
-        uint256 added = (amount * ratio) / 100;
+        // Scale 6-dp USDC up to 18-dp phUSD before applying the ratio. Multiply-then-divide
+        // keeps full precision and floors the result, so any sub-wei remainder accrues to
+        // the protocol (never over-credits).
+        uint256 added = (amount * USDC_TO_PHUSD_SCALE * ratio) / 100;
         if (added == 0) return;
         mintDebt += added;
         emit DebtAccrued(minter, amount, added, mintDebt);
