@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {ISkyPSM} from "../../src/V2/interfaces/ISkyPSM.sol";
+import {ISkyPSM} from "../../src/interfaces/ISkyPSM.sol";
 
 /// @dev Faithful mock of the Sky USDS↔USDC PSM (UsdsPsmWrapper over Maker LitePSM).
 ///      Replicates the real `buyGem` semantics so a wrong contract-side assumption

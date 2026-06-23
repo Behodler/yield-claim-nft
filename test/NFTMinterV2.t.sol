@@ -2,14 +2,14 @@
 pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
-import {NFTMinterV2} from "../../src/V2/NFTMinterV2.sol";
-import {GatherV2} from "../../src/V2/dispatchers/GatherV2.sol";
-import {ATokenDispatcherV2} from "../../src/V2/dispatchers/ATokenDispatcherV2.sol";
-import {BurnerV2} from "../../src/V2/dispatchers/BurnerV2.sol";
-import {BurnRecorder} from "../../src/BurnRecorder.sol";
+import {NFTMinterV2} from "../src/NFTMinterV2.sol";
+import {GatherV2} from "../src/dispatchers/GatherV2.sol";
+import {ATokenDispatcherV2} from "../src/dispatchers/ATokenDispatcherV2.sol";
+import {BurnerV2} from "../src/dispatchers/BurnerV2.sol";
+import {BurnRecorder} from "../src/BurnRecorder.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import {MockFOTToken} from "../mocks/MockFOTToken.sol";
+import {MockFOTToken} from "./mocks/MockFOTToken.sol";
 
 /// @dev Simple mock ERC20 for testing.
 contract MockERC20 is ERC20 {

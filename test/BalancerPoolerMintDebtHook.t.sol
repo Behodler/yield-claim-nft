@@ -5,13 +5,13 @@ import {Test} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {
     BalancerPoolerMintDebtHook
-} from "../../src/V2/hooks/BalancerPoolerMintDebtHook.sol";
-import {IMintable} from "../../src/interfaces/IMintable.sol";
+} from "../src/hooks/BalancerPoolerMintDebtHook.sol";
+import {IMintable} from "../src/interfaces/IMintable.sol";
 import {
     MockMintable,
     ReentrantMockMintable,
     IReentrantPullTarget
-} from "../mocks/MockMintable.sol";
+} from "./mocks/MockMintable.sol";
 
 contract BalancerPoolerMintDebtHookTest is Test {
     BalancerPoolerMintDebtHook internal hookContract;

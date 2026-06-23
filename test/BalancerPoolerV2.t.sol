@@ -3,24 +3,24 @@ pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
-import {BalancerPoolerV2} from "../../src/V2/dispatchers/BalancerPoolerV2.sol";
-import {IUnlockCallback} from "../../src/interfaces/balancer/IUnlockCallback.sol";
+import {BalancerPoolerV2} from "../src/dispatchers/BalancerPoolerV2.sol";
+import {IUnlockCallback} from "../src/interfaces/balancer/IUnlockCallback.sol";
 import {
     AddLiquidityParams,
     AddLiquidityKind,
     VaultSwapParams,
     SwapKind
-} from "../../src/interfaces/balancer/BalancerTypes.sol";
-import {IDispatchHook} from "../../src/V2/interfaces/IDispatchHook.sol";
-import {MockDispatchHook} from "../mocks/MockDispatchHook.sol";
-import {MockMintable} from "../mocks/MockMintable.sol";
-import {BalancerPoolerMintDebtHook} from "../../src/V2/hooks/BalancerPoolerMintDebtHook.sol";
+} from "../src/interfaces/balancer/BalancerTypes.sol";
+import {IDispatchHook} from "../src/interfaces/IDispatchHook.sol";
+import {MockDispatchHook} from "./mocks/MockDispatchHook.sol";
+import {MockMintable} from "./mocks/MockMintable.sol";
+import {BalancerPoolerMintDebtHook} from "../src/hooks/BalancerPoolerMintDebtHook.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {MockERC4626} from "../mocks/MockERC4626.sol";
-import {MockERC4626Wrapper} from "../mocks/MockERC4626Wrapper.sol";
-import {MockSkyPSM} from "../mocks/MockSkyPSM.sol";
+import {MockERC4626} from "./mocks/MockERC4626.sol";
+import {MockERC4626Wrapper} from "./mocks/MockERC4626Wrapper.sol";
+import {MockSkyPSM} from "./mocks/MockSkyPSM.sol";
 
 /// @dev Mock ERC20 with configurable decimals for testing.
 contract MockERC20 is ERC20 {

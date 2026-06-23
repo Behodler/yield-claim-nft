@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {IDispatchHook} from "../../src/V2/interfaces/IDispatchHook.sol";
+import {IDispatchHook} from "../../src/interfaces/IDispatchHook.sol";
 
 /// @dev Recording mock for IDispatchHook. Captures the last call's arguments and a
 ///      running call count for use in dispatcher-level tests.

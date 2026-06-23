@@ -3,9 +3,9 @@ pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
-import {ATokenDispatcherV2} from "../../src/V2/dispatchers/ATokenDispatcherV2.sol";
-import {IDispatchHook} from "../../src/V2/interfaces/IDispatchHook.sol";
-import {DefaultDispatchHook} from "../../src/V2/hooks/DefaultDispatchHook.sol";
+import {ATokenDispatcherV2} from "../src/dispatchers/ATokenDispatcherV2.sol";
+import {IDispatchHook} from "../src/interfaces/IDispatchHook.sol";
+import {DefaultDispatchHook} from "../src/hooks/DefaultDispatchHook.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {
@@ -13,7 +13,7 @@ import {
     RevertingDispatchHook,
     ReentrantDispatchHook,
     IReentrantDispatchTarget
-} from "../mocks/MockDispatchHook.sol";
+} from "./mocks/MockDispatchHook.sol";
 
 /// @dev Minimal concrete test harness that exposes `_dispatch` side effects so we can
 ///      assert the abstract's dispatch pipeline (modifier chain, hook callout,

@@ -2,14 +2,14 @@
 pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
-import {NudgeRatchet} from "../../src/V2/dispatchers/NudgeRatchet.sol";
-import {NFTMinterV2} from "../../src/V2/NFTMinterV2.sol";
-import {IDispatchHook} from "../../src/V2/interfaces/IDispatchHook.sol";
-import {NudgeRatchetMintDebtHook} from "../../src/V2/hooks/NudgeRatchetMintDebtHook.sol";
+import {NudgeRatchet} from "../src/dispatchers/NudgeRatchet.sol";
+import {NFTMinterV2} from "../src/NFTMinterV2.sol";
+import {IDispatchHook} from "../src/interfaces/IDispatchHook.sol";
+import {NudgeRatchetMintDebtHook} from "../src/hooks/NudgeRatchetMintDebtHook.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import {MockDispatchHook} from "../mocks/MockDispatchHook.sol";
-import {MockMintable} from "../mocks/MockMintable.sol";
+import {MockDispatchHook} from "./mocks/MockDispatchHook.sol";
+import {MockMintable} from "./mocks/MockMintable.sol";
 
 /// @dev USDC-like 6-decimal mock ERC20 for NudgeRatchet tests.
 contract MockUSDC is ERC20 {

@@ -2,10 +2,10 @@
 pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
-import {BurnerV2} from "../../src/V2/dispatchers/BurnerV2.sol";
-import {BurnRecorder} from "../../src/BurnRecorder.sol";
-import {IDispatchHook} from "../../src/V2/interfaces/IDispatchHook.sol";
-import {MockDispatchHook} from "../mocks/MockDispatchHook.sol";
+import {BurnerV2} from "../src/dispatchers/BurnerV2.sol";
+import {BurnRecorder} from "../src/BurnRecorder.sol";
+import {IDispatchHook} from "../src/interfaces/IDispatchHook.sol";
+import {MockDispatchHook} from "./mocks/MockDispatchHook.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 /// @dev Mock ERC20 with burn capability for testing expected burn behavior.

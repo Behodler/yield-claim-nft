@@ -3,11 +3,11 @@ pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
-import {NudgeRatchetMintDebtHook} from "../../src/V2/hooks/NudgeRatchetMintDebtHook.sol";
-import {NudgeRatchet} from "../../src/V2/dispatchers/NudgeRatchet.sol";
-import {IDispatchHook} from "../../src/V2/interfaces/IDispatchHook.sol";
+import {NudgeRatchetMintDebtHook} from "../src/hooks/NudgeRatchetMintDebtHook.sol";
+import {NudgeRatchet} from "../src/dispatchers/NudgeRatchet.sol";
+import {IDispatchHook} from "../src/interfaces/IDispatchHook.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import {MockMintable, ReentrantMockMintable, IReentrantPullTarget} from "../mocks/MockMintable.sol";
+import {MockMintable, ReentrantMockMintable, IReentrantPullTarget} from "./mocks/MockMintable.sol";
 
 /// @dev USDC-like 6-decimal mock ERC20 for the wiring test.
 contract MockUSDC6 is ERC20 {

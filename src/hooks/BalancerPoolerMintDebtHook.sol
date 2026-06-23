@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import {IDispatchHook} from "../interfaces/IDispatchHook.sol";
 import {IBalancerPoolerMintDebtHook} from "../interfaces/IBalancerPoolerMintDebtHook.sol";
-import {IMintable} from "../../interfaces/IMintable.sol";
+import {IMintable} from "../interfaces/IMintable.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 

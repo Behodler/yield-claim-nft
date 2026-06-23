@@ -3,8 +3,8 @@ pragma solidity ^0.8.20;
 
 import {ATokenDispatcherV2} from "./ATokenDispatcherV2.sol";
 import {ITokenDispatcherV2} from "../interfaces/ITokenDispatcherV2.sol";
-import {IBurnable} from "../../interfaces/IBurnable.sol";
-import {IBurnRecorder} from "../../interfaces/IBurnRecorder.sol";
+import {IBurnable} from "../interfaces/IBurnable.sol";
+import {IBurnRecorder} from "../interfaces/IBurnRecorder.sol";
 
 /// @title BurnerV2
 /// @notice A V2 token dispatcher that burns the token received from minting.

@@ -2,13 +2,13 @@
 pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
-import {GatherV2} from "../../src/V2/dispatchers/GatherV2.sol";
-import {NFTMinterV2} from "../../src/V2/NFTMinterV2.sol";
-import {IDispatchHook} from "../../src/V2/interfaces/IDispatchHook.sol";
+import {GatherV2} from "../src/dispatchers/GatherV2.sol";
+import {NFTMinterV2} from "../src/NFTMinterV2.sol";
+import {IDispatchHook} from "../src/interfaces/IDispatchHook.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import {MockFOTToken} from "../mocks/MockFOTToken.sol";
-import {MockDispatchHook} from "../mocks/MockDispatchHook.sol";
+import {MockFOTToken} from "./mocks/MockFOTToken.sol";
+import {MockDispatchHook} from "./mocks/MockDispatchHook.sol";
 
 /// @dev Simple mock ERC20 for testing.
 contract MockERC20 is ERC20 {
