@@ -458,14 +458,14 @@ contract UniboostTest is Test {
     function test_pool_revertsWhenNothingToPool() public {
         vm.prank(authorizedPooler);
         vm.expectRevert("Uniboost: nothing to pool");
-        uniboost.pool(0, 0, 0);
+        uniboost.pool(0, 0, 0, 0);
     }
 
     function test_pool_revertsForNonAuthorizedPooler() public {
         _seedPrime(100e6);
         vm.prank(nonOwner);
         vm.expectRevert("Uniboost: caller not authorized pooler");
-        uniboost.pool(0, 0, 0);
+        uniboost.pool(100e6, 0, 0, 0);
     }
 
     function test_pool_endToEnd_sequenceAndLPLandsOnDispatcher() public {
@@ -476,7 +476,7 @@ contract UniboostTest is Test {
         vm.prank(authorizedPooler);
         vm.expectEmit(true, false, false, true);
         emit Uniboost.Pooled(authorizedPooler, 100e6, 50e6, 0);
-        uniboost.pool(0, 0, 0);
+        uniboost.pool(100e6, 0, 0, 0);
 
         // prime fully spent (swapped away).
         assertEq(prime.balanceOf(address(uniboost)), 0, "prime fully swapped");
@@ -494,7 +494,7 @@ contract UniboostTest is Test {
     function test_pool_usesDirectPath_forPrimeSwap() public {
         _seedPrime(100e6);
         vm.prank(authorizedPooler);
-        uniboost.pool(0, 0, 0);
+        uniboost.pool(100e6, 0, 0, 0);
         assertEq(router.lastSwapPathFirst(), address(pair), "last swap (pair->target) path[0] == pair");
         assertEq(router.lastSwapPathLast(), address(target), "last swap path[last] == target");
     }
@@ -504,7 +504,7 @@ contract UniboostTest is Test {
         router.setSwapRateBps(5000); // 100 USDC -> 50 pair, below floor
         vm.prank(authorizedPooler);
         vm.expectRevert("MockRouter: INSUFFICIENT_OUTPUT_AMOUNT");
-        uniboost.pool(80e6, 0, 0); // minPairOut = 80, got 50
+        uniboost.pool(100e6, 80e6, 0, 0); // minPairOut = 80, got 50
     }
 
     function test_pool_revertsWhenMinTargetOutNotMet() public {
@@ -515,7 +515,7 @@ contract UniboostTest is Test {
         router.setSwapRateBps(5000);
         vm.prank(authorizedPooler);
         vm.expectRevert("MockRouter: INSUFFICIENT_OUTPUT_AMOUNT");
-        uniboost.pool(0, 20e6, 0); // minTargetOut not met on second swap
+        uniboost.pool(100e6, 0, 20e6, 0); // minTargetOut not met on second swap
     }
 
     function test_pool_revertsWhenMinLPNotMet() public {
@@ -523,7 +523,7 @@ contract UniboostTest is Test {
         router.setConfigurableLP(10e6); // addLiquidity mints only 10 LP
         vm.prank(authorizedPooler);
         vm.expectRevert("Uniboost: insufficient LP");
-        uniboost.pool(0, 0, 50e6); // minLP = 50, got 10
+        uniboost.pool(100e6, 0, 0, 50e6); // minLP = 50, got 10
     }
 
     function test_pool_respectsWhenNotPaused() public {
@@ -532,7 +532,40 @@ contract UniboostTest is Test {
         uniboost.pause();
         vm.prank(authorizedPooler);
         vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
-        uniboost.pool(0, 0, 0);
+        uniboost.pool(100e6, 0, 0, 0);
+    }
+
+    function test_pool_partialAmount_leavesRemainderAndStillMintsLP() public {
+        // Retain 100 USDC; pool only 13. 1:1 swap: 13 USDC -> 13 pair, half(6.5) -> 6.5 target,
+        // addLiquidity pulls targetBal(6.5) + pairRemaining(6.5), mints LP = amountADesired = 6.5.
+        _seedPrime(100e6);
+
+        uint256 amountIn = 13e6;
+        vm.prank(authorizedPooler);
+        vm.expectEmit(true, false, false, true);
+        emit Uniboost.Pooled(authorizedPooler, amountIn, 6_500_000, 0);
+        uniboost.pool(amountIn, 0, 0, 0);
+
+        // Exactly amountIn consumed; remainder stays on the dispatcher for a later pool().
+        assertEq(prime.balanceOf(address(uniboost)), 100e6 - amountIn, "remainder of prime retained");
+        // Only amountIn was swapped into the pair side on the first swap.
+        assertEq(router.lastAddTokenA(), address(target), "addLiquidity tokenA == targetToken");
+        // LP still minted to the dispatcher.
+        assertEq(pool.balanceOf(address(uniboost)), 6_500_000, "LP minted to dispatcher on partial pool");
+    }
+
+    function test_pool_revertsWhenAmountInZero() public {
+        _seedPrime(100e6);
+        vm.prank(authorizedPooler);
+        vm.expectRevert("Uniboost: nothing to pool");
+        uniboost.pool(0, 0, 0, 0);
+    }
+
+    function test_pool_revertsWhenAmountInExceedsBalance() public {
+        _seedPrime(100e6);
+        vm.prank(authorizedPooler);
+        vm.expectRevert("Uniboost: insufficient prime");
+        uniboost.pool(100e6 + 1, 0, 0, 0);
     }
 
     function test_pool_doesNotInvokeHook() public {
@@ -542,7 +575,7 @@ contract UniboostTest is Test {
         assertEq(hook.callCount(), 1, "dispatch invoked hook once");
 
         vm.prank(authorizedPooler);
-        uniboost.pool(0, 0, 0);
+        uniboost.pool(100e6, 0, 0, 0);
         assertEq(hook.callCount(), 1, "pool() must not invoke the dispatch hook");
     }
 
@@ -581,7 +614,7 @@ contract UniboostTest is Test {
         _seedPrime(100e6);
         vm.prank(p);
         vm.expectRevert("Uniboost: caller not authorized pooler");
-        uniboost.pool(0, 0, 0);
+        uniboost.pool(100e6, 0, 0, 0);
     }
 
     function test_incrementAuthVersion_massRevoke() public {
@@ -595,13 +628,13 @@ contract UniboostTest is Test {
         _seedPrime(100e6);
         vm.prank(authorizedPooler);
         vm.expectRevert("Uniboost: caller not authorized pooler");
-        uniboost.pool(0, 0, 0);
+        uniboost.pool(100e6, 0, 0, 0);
 
         // Re-authorize works at new version.
         uniboost.setAuthorizedPooler(authorizedPooler, true);
         assertEq(uniboost.poolerAuthVersion(authorizedPooler), 2);
         vm.prank(authorizedPooler);
-        uniboost.pool(0, 0, 0); // succeeds now
+        uniboost.pool(100e6, 0, 0, 0); // succeeds now
     }
 
     function test_incrementAuthVersion_revertsForNonOwner() public {
@@ -630,7 +663,7 @@ contract UniboostTest is Test {
         // Pool to leave LP (the pool token) on the dispatcher, then rescue it.
         _seedPrime(100e6);
         vm.prank(authorizedPooler);
-        uniboost.pool(0, 0, 0);
+        uniboost.pool(100e6, 0, 0, 0);
 
         uint256 lp = pool.balanceOf(address(uniboost));
         assertTrue(lp > 0, "dispatcher holds LP after pool");

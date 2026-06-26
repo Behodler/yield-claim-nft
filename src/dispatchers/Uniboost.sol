@@ -198,22 +198,25 @@ contract Uniboost is ATokenDispatcherV2 {
         // will consume. No wrapping, no swap, nothing else.
     }
 
-    /// @notice Boosts the target pool: swaps all retained prime -> pair, swaps ~half the pair ->
-    ///         target, then adds both sides as liquidity. LP tokens accrue on the dispatcher
-    ///         (protocol-owned liquidity). Only callable by authorized poolers.
-    /// @param minPairOut Slippage floor for the pair token received from swapping all prime.
+    /// @notice Boosts the target pool: swaps `amountIn` of retained prime -> pair, swaps ~half the
+    ///         pair -> target, then adds both sides as liquidity. LP tokens accrue on the dispatcher
+    ///         (protocol-owned liquidity). Only callable by authorized poolers. Pooling less than
+    ///         the full retained balance leaves the remainder on the dispatcher for a later `pool()`.
+    /// @param amountIn Absolute amount of retained prime token to pool (raw token units). Must be
+    ///        nonzero and no greater than the dispatcher's current prime balance.
+    /// @param minPairOut Slippage floor for the pair token received from swapping `amountIn` of prime.
     /// @param minTargetOut Slippage floor for the target token received from swapping ~half the pair.
     /// @param minLP Floor for the LP minted by `addLiquidity` (enforced post-call; UniV2's router
     ///        has no min-liquidity param).
-    function pool(uint256 minPairOut, uint256 minTargetOut, uint256 minLP)
+    function pool(uint256 amountIn, uint256 minPairOut, uint256 minTargetOut, uint256 minLP)
         external
         onlyAuthorizedPooler
         whenNotPaused
         nonReentrant
     {
-        // Step 1: swap all retained prime -> pairing token.
-        uint256 amountIn = IERC20(_primeToken).balanceOf(address(this));
+        // Step 1: swap `amountIn` of retained prime -> pairing token.
         require(amountIn > 0, "Uniboost: nothing to pool");
+        require(amountIn <= IERC20(_primeToken).balanceOf(address(this)), "Uniboost: insufficient prime");
         IERC20(_primeToken).forceApprove(_router, amountIn);
         IUniswapV2Router02(_router).swapExactTokensForTokens(
             amountIn, minPairOut, primeToPairPath(), address(this), block.timestamp
