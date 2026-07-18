@@ -61,8 +61,10 @@ contract PromotionUniV2_EthForkTest is Test {
     address internal authorizedPooler = address(0xD00D);
 
     function setUp() public {
-        // Fork mainnet. Prefer an archive RPC via env; fall back to a public node for head runs.
-        string memory rpc = vm.envOr("MAINNET_RPC_URL", string("https://ethereum-rpc.publicnode.com"));
+        // Fork mainnet. Prefer an archive RPC via env (accept either MAINNET_RPC_URL or the RPC_MAINNET
+        // name used by the local .envrc); fall back to a public node for head runs.
+        string memory rpc =
+            vm.envOr("MAINNET_RPC_URL", vm.envOr("RPC_MAINNET", string("https://ethereum-rpc.publicnode.com")));
         vm.createSelectFork(rpc, FORK_BLOCK);
 
         promo = new MockPromoToken();
@@ -546,17 +548,23 @@ contract PromotionUniV2_EthForkTest is Test {
     }
 
     function test_receive_and_rescueETH() public {
+        // The dispatcher's deterministic deploy address may already carry trace ETH on the fork
+        // (mainnet has 1 wei sitting at it), so assert on balance deltas rather than absolutes.
+        uint256 startBal = address(dispatcher).balance;
+
         // receive() accepts native ETH.
         vm.deal(address(this), 5 ether);
         (bool sent,) = address(dispatcher).call{value: 3 ether}("");
         assertTrue(sent, "receive() accepted ETH");
-        assertEq(address(dispatcher).balance, 3 ether);
+        assertEq(address(dispatcher).balance, startBal + 3 ether);
 
-        // rescueETH moves it out (owner-gated, non-zero recipient).
+        // rescueETH moves it out (owner-gated, non-zero recipient). `to` may also carry pre-existing
+        // fork ETH, so assert on its delta as well.
         address payable to = payable(address(0xEEEE));
+        uint256 toStart = to.balance;
         dispatcher.rescueETH(to, 3 ether);
-        assertEq(to.balance, 3 ether);
-        assertEq(address(dispatcher).balance, 0);
+        assertEq(to.balance, toStart + 3 ether);
+        assertEq(address(dispatcher).balance, startBal);
     }
 
     function test_rescueETH_revertsZeroRecipient() public {

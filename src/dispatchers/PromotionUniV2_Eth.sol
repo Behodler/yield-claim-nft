@@ -477,7 +477,11 @@ contract PromotionUniV2_Eth is ATokenDispatcherV2, IUnlockCallback {
         bytes memory inner = abi.encode(sharesIn, minPhusdOut);
         bytes memory ret =
             IBalancerVault(BALANCER_VAULT).unlock(abi.encodeWithSelector(IUnlockCallback.unlockCallback.selector, inner));
-        return abi.decode(ret, (uint256));
+        // `unlock` returns the callback's raw returndata verbatim, which is the ABI-encoding of the
+        // callback's declared `bytes` return value (itself `abi.encode(amountOut)`). Unwrap the outer
+        // `bytes` first, then decode the inner word — decoding `ret` directly as a uint256 would read
+        // the ABI offset (0x20), silently collapsing amountOut to 32 and burning almost nothing.
+        return abi.decode(abi.decode(ret, (bytes)), (uint256));
     }
 
     /// @inheritdoc IUnlockCallback
