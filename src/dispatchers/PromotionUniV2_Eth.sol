@@ -7,6 +7,7 @@ import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {ATokenDispatcherV2} from "./ATokenDispatcherV2.sol";
 import {ITokenDispatcherV2} from "../interfaces/ITokenDispatcherV2.sol";
 import {ISkyPSM} from "../interfaces/ISkyPSM.sol";
+import {IPhusdBurnable} from "../interfaces/IPhusdBurnable.sol";
 import {IBalancerVault} from "../interfaces/balancer/IBalancerVault.sol";
 import {IUnlockCallback} from "../interfaces/balancer/IUnlockCallback.sol";
 import {VaultSwapParams, SwapKind} from "../interfaces/balancer/BalancerTypes.sol";
@@ -23,13 +24,17 @@ import {IUniswapV2Pair} from "../interfaces/uniswap/IUniswapV2Pair.sol";
 ///
 ///      The prime token is USDC. On `dispatch`, a configurable donation split of the USDC is
 ///      forwarded to `batchMinter` and the rest is retained. On `pool` (authorized-pooler gated),
-///      the retained USDC is split 50/50:
-///        - Leg A → phUSD: USDC →(SKY PSM `sellGem`)→ USDS →(ERC4626 `deposit`)→ sUSDS
-///          →(Balancer V3 swap)→ phUSD.
-///        - Leg B → promotion: USDC →(UniV2 `swapExactTokensForETH`)→ native ETH
+///      the retained USDC is split 60/30/10:
+///        - Leg A (60%) → phUSD: USDC →(SKY PSM `sellGem`)→ USDS →(ERC4626 `deposit`)→ sUSDS
+///          →(Balancer V3 swap)→ phUSD. HALF the acquired phUSD is burned (permanent supply cut);
+///          the rest is pooled, value-matching the promotion side.
+///        - Leg B (30%) → promotion: USDC →(UniV2 `swapExactTokensForETH`)→ native ETH
 ///          →(UniV2 `swapExactETHForTokens`)→ promotion token.
-///      Both sides are then added as liquidity to the target phUSD/promotion UniV2 pair; the LP
-///      token accrues on the dispatcher as protocol-owned liquidity (withdrawn via `rescueERC20`).
+///        - Leg C (10%) → WBTC: USDC →(UniV2 `swapExactTokensForTokens`)→ WBTC, retained on the
+///          dispatcher as an insurance reserve (NOT pooled; withdrawable only by `insurer`).
+///      The phUSD and promotion sides are added as liquidity to the target phUSD/promotion UniV2
+///      pair; the LP token accrues on the dispatcher as protocol-owned liquidity (withdrawn via
+///      `rescueERC20`).
 ///
 ///      Everything mainnet-fixed is hardcoded as `address constant`s; only the promotion token and
 ///      its phUSD/promotion pair are per-partner (constructor params). Guards live on this concrete
@@ -59,6 +64,10 @@ contract PromotionUniV2_Eth is ATokenDispatcherV2, IUnlockCallback {
     /// @notice Uniswap V2 Router02.
     address public constant UNIV2_ROUTER = 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D;
 
+    /// @notice WBTC — the insurance-reserve asset acquired by Leg C. 8dp. Never pooled; withdrawable
+    ///         only by `insurer` (via `withdrawWBTC`), and explicitly excluded from `rescueERC20`.
+    address public constant WBTC = 0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599;
+
     /// @dev 1e18 fixed-point scale (matches the Sky PSM WAD used for `tin`).
     uint256 internal constant WAD = 1e18;
 
@@ -87,6 +96,17 @@ contract PromotionUniV2_Eth is ATokenDispatcherV2, IUnlockCallback {
     ///         at `promotionToken` (validated in `setEthToPromotionPath`).
     address[] private _ethToPromotionPath;
 
+    /// @notice Owner-settable routing path for Leg C (USDC → WBTC). When empty, the direct
+    ///         `[USDC, WBTC]` path is used (cheapest gas; the direct V2 pool is deep enough for the
+    ///         small per-pool amounts). Set it to e.g. `[USDC, WETH, WBTC]` to reroute via WETH if
+    ///         the direct pool degrades. Must start at USDC and end at WBTC.
+    address[] private _usdcToWbtcPath;
+
+    /// @notice The insurance-reserve role — the ONLY address permitted to withdraw WBTC (via
+    ///         `withdrawWBTC`). Owner-settable via `setInsurer`; deliberately NOT seeded in the
+    ///         constructor (starts address(0), which locks `withdrawWBTC` until an owner sets it).
+    address public insurer;
+
     // ---------------------------------------------------------------------
     // Donation state (copied from Uniboost, named per spec)
     // ---------------------------------------------------------------------
@@ -113,7 +133,16 @@ contract PromotionUniV2_Eth is ATokenDispatcherV2, IUnlockCallback {
     event PoolerAuthorized(address indexed pooler, uint256 atAuthVersion);
     event PoolerDeauthorized(address indexed pooler);
     event AuthVersionIncremented(uint256 newAuthVersion);
-    event Pooled(address indexed pooler, uint256 primeSpent, uint256 phusdOut, uint256 liquidity, uint256 minLP);
+
+    /// @notice Emitted once per `pool()`. Consolidates the full 60/30/10 outcome.
+    event Pooled(
+        address indexed pooler,
+        uint256 primeSpent, // amountIn (USDC)
+        uint256 phusdAcquired, // gross phUSD out of Leg A (pre-burn)
+        uint256 phusdBurned, // = phusdAcquired / 2
+        uint256 wbtcAcquired, // WBTC out of Leg C (8dp)
+        uint256 liquidity // LP minted into the phUSD/promotion pair
+    );
 
     event PoolSet(address indexed pair);
     event DonationSplitSet(uint256 newSplit);
@@ -121,9 +150,17 @@ contract PromotionUniV2_Eth is ATokenDispatcherV2, IUnlockCallback {
     event PSMSet(address newPSM);
     event MaxTinSet(uint256 newMaxTin);
     event EthToPromotionPathSet(address[] path);
+    event UsdcToWbtcPathSet(address[] path);
+    event InsurerSet(address newInsurer);
+    event WBTCWithdrawn(address indexed to, uint256 amount);
 
     modifier onlyAuthorizedPooler() {
         require(poolerAuthVersion[msg.sender] == authVersion, "PromotionUniV2_Eth: caller not authorized pooler");
+        _;
+    }
+
+    modifier onlyInsurer() {
+        require(msg.sender == insurer, "PromotionUniV2_Eth: not insurer");
         _;
     }
 
@@ -137,6 +174,11 @@ contract PromotionUniV2_Eth is ATokenDispatcherV2, IUnlockCallback {
         promotionToken = promotionToken_;
         authVersion = 1;
         _setPool(targetPair_);
+        // phUSD's burn is allowance-based (transferFrom-style): to burn its own phUSD in `pool()`
+        // the dispatcher must be an approved spender over itself. Set an infinite self-allowance
+        // once here (OZ skips the decrement on a max allowance, so no `pool()` needs a per-call
+        // approve). Harmless: it only lets the contract burn phUSD it already holds.
+        IERC20(phUSD).forceApprove(address(this), type(uint256).max);
     }
 
     // ---------------------------------------------------------------------
@@ -162,6 +204,18 @@ contract PromotionUniV2_Eth is ATokenDispatcherV2, IUnlockCallback {
             return path;
         }
         return _ethToPromotionPath;
+    }
+
+    /// @notice Returns the effective USDC → WBTC routing path for Leg C (defaults to the direct
+    ///         `[USDC, WBTC]` single hop).
+    function usdcToWbtcPath() public view returns (address[] memory) {
+        if (_usdcToWbtcPath.length == 0) {
+            address[] memory path = new address[](2);
+            path[0] = USDC;
+            path[1] = WBTC;
+            return path;
+        }
+        return _usdcToWbtcPath;
     }
 
     // ---------------------------------------------------------------------
@@ -195,6 +249,33 @@ contract PromotionUniV2_Eth is ATokenDispatcherV2, IUnlockCallback {
         require(path[path.length - 1] == promotionToken, "PromotionUniV2_Eth: path end not promotion");
         _ethToPromotionPath = path;
         emit EthToPromotionPathSet(path);
+    }
+
+    /// @notice Sets a custom routing path for the USDC → WBTC swap performed in `pool()` (Leg C).
+    ///         Must start at USDC and end at WBTC. Only callable by owner.
+    /// @param path The routing path (length >= 2).
+    function setUsdcToWbtcPath(address[] calldata path) external onlyOwner {
+        require(path.length >= 2, "PromotionUniV2_Eth: path too short");
+        require(path[0] == USDC, "PromotionUniV2_Eth: path start not USDC");
+        require(path[path.length - 1] == WBTC, "PromotionUniV2_Eth: path end not WBTC");
+        _usdcToWbtcPath = path;
+        emit UsdcToWbtcPathSet(path);
+    }
+
+    /// @notice Sets the insurance-reserve role permitted to withdraw WBTC. Must be non-zero.
+    ///         Only callable by owner.
+    function setInsurer(address newInsurer) external onlyOwner {
+        require(newInsurer != address(0), "PromotionUniV2_Eth: zero insurer");
+        insurer = newInsurer;
+        emit InsurerSet(newInsurer);
+    }
+
+    /// @notice Withdraws `amount` (WBTC, 8dp) of the insurance reserve to `to`. Insurer only.
+    ///         Not pause-gated (escape-hatch convention); insurer-gated instead.
+    function withdrawWBTC(address to, uint256 amount) external onlyInsurer {
+        require(to != address(0), "PromotionUniV2_Eth: zero recipient");
+        IERC20(WBTC).safeTransfer(to, amount);
+        emit WBTCWithdrawn(to, amount);
     }
 
     /// @notice Sets the Sky USDS↔USDC PSM used by Leg A. Must be non-zero. Only callable by owner.
@@ -265,16 +346,27 @@ contract PromotionUniV2_Eth is ATokenDispatcherV2, IUnlockCallback {
     // Pool
     // ---------------------------------------------------------------------
 
-    /// @notice Boosts the target pool: splits `amountIn` of retained USDC 50/50, acquires phUSD via
-    ///         Balancer (Leg A) and promotion via native ETH (Leg B), then adds both sides as
-    ///         liquidity. LP tokens accrue on the dispatcher (protocol-owned liquidity). Only
-    ///         callable by authorized poolers.
+    /// @notice Boosts the target pool: splits `amountIn` of retained USDC 60/30/10 — 60% to phUSD
+    ///         (Leg A, Balancer), 30% to promotion (Leg B, native ETH), 10% to WBTC (Leg C, direct
+    ///         UniV2). HALF the acquired phUSD is burned (permanent supply cut) so the pooled phUSD
+    ///         value (~30% of USDC) matches the pooled promotion value (~30% of USDC); the rest is
+    ///         added as liquidity. The WBTC is retained as an insurance reserve (NOT pooled). LP
+    ///         tokens accrue on the dispatcher (protocol-owned liquidity). Only callable by
+    ///         authorized poolers.
     /// @param amountIn Absolute amount of retained USDC to pool. Nonzero, <= the current USDC balance.
-    /// @param minPhusdOut Slippage floor for phUSD out of the Balancer swap (Leg A).
+    /// @param minPhusdOut Slippage floor for phUSD out of the Balancer swap (Leg A, full pre-burn output).
     /// @param minEthOut Slippage floor for native ETH out of the USDC→ETH swap (Leg B step 1).
     /// @param minPromoOut Slippage floor for promotion out of the ETH→promotion swap (Leg B step 2).
+    /// @param minWbtcOut Slippage floor for WBTC out of the USDC→WBTC swap (Leg C).
     /// @param minLP Floor for the LP minted by `addLiquidity` (enforced post-call).
-    function pool(uint256 amountIn, uint256 minPhusdOut, uint256 minEthOut, uint256 minPromoOut, uint256 minLP)
+    function pool(
+        uint256 amountIn,
+        uint256 minPhusdOut,
+        uint256 minEthOut,
+        uint256 minPromoOut,
+        uint256 minWbtcOut,
+        uint256 minLP
+    )
         external
         onlyAuthorizedPooler
         whenNotPaused
@@ -283,27 +375,46 @@ contract PromotionUniV2_Eth is ATokenDispatcherV2, IUnlockCallback {
         require(amountIn > 0, "PromotionUniV2_Eth: nothing to pool");
         require(amountIn <= IERC20(USDC).balanceOf(address(this)), "PromotionUniV2_Eth: insufficient prime");
 
-        uint256 halfA = amountIn / 2;
-        uint256 halfB = amountIn - halfA;
+        uint256 phusdAcquired;
+        uint256 wbtcAcquired;
+        {
+            // Scoped so the leg amounts free their stack slots before the add-liquidity step
+            // (this contract compiles without via_ir, so local-variable count matters).
+            uint256 amountA = (amountIn * 60) / 100; // phUSD leg
+            uint256 amountB = (amountIn * 30) / 100; // promotion leg
+            uint256 amountC = amountIn - amountA - amountB; // WBTC leg (~10% + rounding dust → reserve)
 
-        uint256 phusdOut = _legA(halfA, minPhusdOut);
-        _legB(halfB, minEthOut, minPromoOut);
+            phusdAcquired = _legA(amountA, minPhusdOut);
+            _legB(amountB, minEthOut, minPromoOut);
+            wbtcAcquired = _legC(amountC, minWbtcOut);
+        }
 
-        // Add liquidity (phUSD + promotion). The router consumes the pool's live ratio and refunds
-        // the excess side; residual dust accrues on the dispatcher for the next pool(). minAmounts
-        // are 0 — slippage is bounded by the leg floors and the final minLP check.
+        // Burn half the acquired phUSD (permanent supply cut); pool the rest. This value-matches the
+        // pooled phUSD (~30% of USDC) to the pooled promotion (~30% of USDC). phUSD's burn is
+        // allowance-based; the infinite self-allowance set in the constructor authorizes this.
+        uint256 phusdBurned = phusdAcquired / 2;
+        IPhusdBurnable(phUSD).burn(address(this), phusdBurned);
+
+        uint256 liquidity = _addPhusdPromoLiquidity(minLP);
+
+        emit Pooled(msg.sender, amountIn, phusdAcquired, phusdBurned, wbtcAcquired, liquidity);
+    }
+
+    /// @dev Adds all resident phUSD + promotion as liquidity to the target pair. Sides are ~equal
+    ///      value post-burn so the router refund is negligible. minAmounts stay 0 (bounded by the
+    ///      leg floors + `minLP`). Extracted from `pool()` to keep its stack shallow (no via_ir).
+    /// @return liquidity LP minted into the phUSD/promotion pair.
+    function _addPhusdPromoLiquidity(uint256 minLP) internal returns (uint256 liquidity) {
         uint256 phusdBal = IERC20(phUSD).balanceOf(address(this));
         uint256 promoBal = IERC20(promotionToken).balanceOf(address(this));
         IERC20(phUSD).forceApprove(UNIV2_ROUTER, phusdBal);
         IERC20(promotionToken).forceApprove(UNIV2_ROUTER, promoBal);
-        (,, uint256 liquidity) = IUniswapV2Router02(UNIV2_ROUTER).addLiquidity(
+        (,, liquidity) = IUniswapV2Router02(UNIV2_ROUTER).addLiquidity(
             phUSD, promotionToken, phusdBal, promoBal, 0, 0, address(this), block.timestamp
         );
         require(liquidity >= minLP, "PromotionUniV2_Eth: insufficient LP");
         IERC20(phUSD).forceApprove(UNIV2_ROUTER, 0);
         IERC20(promotionToken).forceApprove(UNIV2_ROUTER, 0);
-
-        emit Pooled(msg.sender, amountIn, phusdOut, liquidity, minLP);
     }
 
     /// @dev Leg A: USDC →(PSM sellGem)→ USDS →(ERC4626 deposit)→ sUSDS →(Balancer swap)→ phUSD.
@@ -345,6 +456,21 @@ contract PromotionUniV2_Eth is ATokenDispatcherV2, IUnlockCallback {
         );
     }
 
+    /// @dev Leg C: USDC → WBTC via `swapExactTokensForTokens(usdcToWbtcPath())` (default `[USDC, WBTC]`,
+    ///      one hop, cheapest gas). The acquired WBTC (8dp) is retained as the insurance reserve — NOT
+    ///      pooled; it leaves only via `withdrawWBTC` (insurer-gated).
+    /// @param usdcAmount USDC (6dp) to convert.
+    /// @param minWbtcOut Slippage floor for the WBTC (8dp) received.
+    /// @return wbtcOut WBTC acquired (8dp).
+    function _legC(uint256 usdcAmount, uint256 minWbtcOut) internal returns (uint256 wbtcOut) {
+        IERC20(USDC).forceApprove(UNIV2_ROUTER, usdcAmount);
+        uint256[] memory amounts = IUniswapV2Router02(UNIV2_ROUTER).swapExactTokensForTokens(
+            usdcAmount, minWbtcOut, usdcToWbtcPath(), address(this), block.timestamp
+        );
+        IERC20(USDC).forceApprove(UNIV2_ROUTER, 0);
+        wbtcOut = amounts[amounts.length - 1];
+    }
+
     /// @dev Balancer V3 low-level EXACT_IN swap of `sharesIn` sUSDS for phUSD (min-out = `minPhusdOut`),
     ///      via the vault `unlock` → `unlockCallback` reentrancy pattern.
     function _swapSusdsForPhusd(uint256 sharesIn, uint256 minPhusdOut) internal returns (uint256) {
@@ -383,9 +509,12 @@ contract PromotionUniV2_Eth is ATokenDispatcherV2, IUnlockCallback {
     // ---------------------------------------------------------------------
 
     /// @notice Owner escape hatch. Transfers `amount` of any ERC20 held by this contract to `to`.
-    ///         Also the LP-withdrawal mechanism (the LP token is the pair ERC20). Not pause-gated.
+    ///         Also the LP-withdrawal mechanism (the LP token is the pair ERC20). WBTC is excluded:
+    ///         the insurance reserve leaves only via the insurer-gated `withdrawWBTC`, never the
+    ///         owner escape hatch. Not pause-gated.
     function rescueERC20(address token, address to, uint256 amount) external onlyOwner {
         require(to != address(0), "PromotionUniV2_Eth: zero recipient");
+        require(token != WBTC, "PromotionUniV2_Eth: WBTC is insurer-only");
         IERC20(token).safeTransfer(to, amount);
     }
 
