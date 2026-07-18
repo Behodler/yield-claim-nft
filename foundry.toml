@@ -8,3 +8,10 @@ remappings = [
 ]
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+
+# Mainnet-fork RPC for PromotionUniV2_Eth.t.sol (the repo's first fork test). Set MAINNET_RPC_URL
+# to an ARCHIVE endpoint (Alchemy/Infura) — the pinned FORK_BLOCK requires historical state that
+# free full-nodes do not serve. The test falls back to a public node via vm.envOr when the var is
+# unset (which works only for unpinned/head runs).
+[rpc_endpoints]
+mainnet = "${MAINNET_RPC_URL}"
