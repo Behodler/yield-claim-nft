@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {PromotionUniV2_Eth} from "../src/dispatchers/PromotionUniV2_Eth.sol";
 import {IDispatchHook} from "../src/interfaces/IDispatchHook.sol";
 import {IUniswapV2Router02} from "../src/interfaces/uniswap/IUniswapV2Router02.sol";
@@ -41,6 +42,7 @@ contract PromotionUniV2_EthForkTest is Test {
     address internal constant phUSD = 0xf3B5B661b92B75C71fA5Aba8Fd95D7514A9CD605;
     address internal constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
     address internal constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
+    address internal constant WBTC = 0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599;
     address internal constant UNIV2_ROUTER = 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D;
     address internal constant UNIV2_FACTORY = 0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f;
 
@@ -377,7 +379,7 @@ contract PromotionUniV2_EthForkTest is Test {
         uint256 lpBefore = IERC20(phusdPromoPair).balanceOf(address(dispatcher));
 
         vm.prank(authorizedPooler);
-        dispatcher.pool(amount, 0, 0, 0, 0);
+        dispatcher.pool(amount, 0, 0, 0, 0, 0);
 
         // USDC fully consumed across both legs.
         assertEq(IERC20(USDC).balanceOf(address(dispatcher)), 0, "USDC fully consumed");
@@ -391,49 +393,56 @@ contract PromotionUniV2_EthForkTest is Test {
     function test_pool_revertsWhenNothingToPool() public {
         vm.prank(authorizedPooler);
         vm.expectRevert("PromotionUniV2_Eth: nothing to pool");
-        dispatcher.pool(0, 0, 0, 0, 0);
+        dispatcher.pool(0, 0, 0, 0, 0, 0);
     }
 
     function test_pool_revertsWhenAmountExceedsBalance() public {
         _seedPrime(1000e6);
         vm.prank(authorizedPooler);
         vm.expectRevert("PromotionUniV2_Eth: insufficient prime");
-        dispatcher.pool(1000e6 + 1, 0, 0, 0, 0);
+        dispatcher.pool(1000e6 + 1, 0, 0, 0, 0, 0);
     }
 
     function test_pool_revertsForNonAuthorizedPooler() public {
         _seedPrime(1000e6);
         vm.prank(nonOwner);
         vm.expectRevert("PromotionUniV2_Eth: caller not authorized pooler");
-        dispatcher.pool(1000e6, 0, 0, 0, 0);
+        dispatcher.pool(1000e6, 0, 0, 0, 0, 0);
     }
 
     function test_pool_revertsWhenMinPhusdOutNotMet() public {
         _seedPrime(5000e6);
         vm.prank(authorizedPooler);
         vm.expectRevert(); // Balancer swap limitRaw floor unmet
-        dispatcher.pool(5000e6, type(uint256).max, 0, 0, 0);
+        dispatcher.pool(5000e6, type(uint256).max, 0, 0, 0, 0);
     }
 
     function test_pool_revertsWhenMinEthOutNotMet() public {
         _seedPrime(5000e6);
         vm.prank(authorizedPooler);
         vm.expectRevert(); // UniV2 USDC->ETH INSUFFICIENT_OUTPUT_AMOUNT
-        dispatcher.pool(5000e6, 0, type(uint256).max, 0, 0);
+        dispatcher.pool(5000e6, 0, type(uint256).max, 0, 0, 0);
     }
 
     function test_pool_revertsWhenMinPromoOutNotMet() public {
         _seedPrime(5000e6);
         vm.prank(authorizedPooler);
         vm.expectRevert(); // UniV2 ETH->promo INSUFFICIENT_OUTPUT_AMOUNT
-        dispatcher.pool(5000e6, 0, 0, type(uint256).max, 0);
+        dispatcher.pool(5000e6, 0, 0, type(uint256).max, 0, 0);
+    }
+
+    function test_pool_revertsWhenMinWbtcOutNotMet() public {
+        _seedPrime(5000e6);
+        vm.prank(authorizedPooler);
+        vm.expectRevert(); // UniV2 USDC->WBTC INSUFFICIENT_OUTPUT_AMOUNT
+        dispatcher.pool(5000e6, 0, 0, 0, type(uint256).max, 0);
     }
 
     function test_pool_revertsWhenMinLPNotMet() public {
         _seedPrime(5000e6);
         vm.prank(authorizedPooler);
         vm.expectRevert("PromotionUniV2_Eth: insufficient LP");
-        dispatcher.pool(5000e6, 0, 0, 0, type(uint256).max);
+        dispatcher.pool(5000e6, 0, 0, 0, 0, type(uint256).max);
     }
 
     function test_pool_revertsWhenPaused() public {
@@ -442,7 +451,7 @@ contract PromotionUniV2_EthForkTest is Test {
         dispatcher.pause();
         vm.prank(authorizedPooler);
         vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
-        dispatcher.pool(5000e6, 0, 0, 0, 0);
+        dispatcher.pool(5000e6, 0, 0, 0, 0, 0);
     }
 
     function test_pool_doesNotInvokeHook() public {
@@ -452,7 +461,7 @@ contract PromotionUniV2_EthForkTest is Test {
         assertEq(hook.callCount(), 1, "dispatch invoked hook once");
 
         vm.prank(authorizedPooler);
-        dispatcher.pool(5000e6, 0, 0, 0, 0);
+        dispatcher.pool(5000e6, 0, 0, 0, 0, 0);
         assertEq(hook.callCount(), 1, "pool() must not invoke the dispatch hook");
     }
 
@@ -474,7 +483,7 @@ contract PromotionUniV2_EthForkTest is Test {
         _seedPrime(1000e6);
         vm.prank(p);
         vm.expectRevert("PromotionUniV2_Eth: caller not authorized pooler");
-        dispatcher.pool(1000e6, 0, 0, 0, 0);
+        dispatcher.pool(1000e6, 0, 0, 0, 0, 0);
     }
 
     function test_incrementAuthVersion_massRevoke() public {
@@ -484,7 +493,7 @@ contract PromotionUniV2_EthForkTest is Test {
         _seedPrime(1000e6);
         vm.prank(authorizedPooler);
         vm.expectRevert("PromotionUniV2_Eth: caller not authorized pooler");
-        dispatcher.pool(1000e6, 0, 0, 0, 0);
+        dispatcher.pool(1000e6, 0, 0, 0, 0, 0);
 
         // Re-authorize at the new version works.
         dispatcher.setAuthorizedPooler(authorizedPooler, true);
@@ -511,7 +520,7 @@ contract PromotionUniV2_EthForkTest is Test {
     function test_rescueERC20_withdrawsLPWhilePaused() public {
         _seedPrime(5000e6);
         vm.prank(authorizedPooler);
-        dispatcher.pool(5000e6, 0, 0, 0, 0);
+        dispatcher.pool(5000e6, 0, 0, 0, 0, 0);
         uint256 lp = IERC20(phusdPromoPair).balanceOf(address(dispatcher));
         assertGt(lp, 0, "dispatcher holds LP");
 
@@ -561,5 +570,243 @@ contract PromotionUniV2_EthForkTest is Test {
         vm.prank(nonOwner);
         vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
         dispatcher.rescueETH(payable(nonOwner), 1 ether);
+    }
+
+    // =====================================================================
+    // usdcToWbtcPath (Leg C routing)
+    // =====================================================================
+
+    function test_usdcToWbtcPath_defaultsToDirect() public view {
+        address[] memory path = dispatcher.usdcToWbtcPath();
+        assertEq(path.length, 2);
+        assertEq(path[0], USDC);
+        assertEq(path[1], WBTC);
+    }
+
+    function test_setUsdcToWbtcPath_storesCustom() public {
+        address[] memory custom = new address[](3);
+        custom[0] = USDC;
+        custom[1] = WETH;
+        custom[2] = WBTC;
+        dispatcher.setUsdcToWbtcPath(custom);
+        address[] memory stored = dispatcher.usdcToWbtcPath();
+        assertEq(stored.length, 3);
+        assertEq(stored[1], WETH);
+    }
+
+    function test_setUsdcToWbtcPath_revertsStartNotUSDC() public {
+        address[] memory bad = new address[](2);
+        bad[0] = WETH;
+        bad[1] = WBTC;
+        vm.expectRevert("PromotionUniV2_Eth: path start not USDC");
+        dispatcher.setUsdcToWbtcPath(bad);
+    }
+
+    function test_setUsdcToWbtcPath_revertsEndNotWBTC() public {
+        address[] memory bad = new address[](2);
+        bad[0] = USDC;
+        bad[1] = WETH;
+        vm.expectRevert("PromotionUniV2_Eth: path end not WBTC");
+        dispatcher.setUsdcToWbtcPath(bad);
+    }
+
+    function test_setUsdcToWbtcPath_revertsTooShort() public {
+        address[] memory bad = new address[](1);
+        bad[0] = USDC;
+        vm.expectRevert("PromotionUniV2_Eth: path too short");
+        dispatcher.setUsdcToWbtcPath(bad);
+    }
+
+    function test_setUsdcToWbtcPath_revertsForNonOwner() public {
+        address[] memory custom = new address[](2);
+        custom[0] = USDC;
+        custom[1] = WBTC;
+        vm.prank(nonOwner);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
+        dispatcher.setUsdcToWbtcPath(custom);
+    }
+
+    // =====================================================================
+    // pool — 60/30/10 split, burn-half, WBTC leg (mainnet fork)
+    // =====================================================================
+
+    /// @dev Decodes the single `Pooled` event emitted by the dispatcher from the recorded logs.
+    function _extractPooled(Vm.Log[] memory logs)
+        internal
+        view
+        returns (
+            uint256 primeSpent,
+            uint256 phusdAcquired,
+            uint256 phusdBurned,
+            uint256 wbtcAcquired,
+            uint256 liquidity
+        )
+    {
+        bytes32 sig = keccak256("Pooled(address,uint256,uint256,uint256,uint256,uint256)");
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter == address(dispatcher) && logs[i].topics.length > 0 && logs[i].topics[0] == sig) {
+                return abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256));
+            }
+        }
+        revert("Pooled event not found");
+    }
+
+    function test_pool_split_60_30_10_andBurnsHalfPhusd() public {
+        uint256 amount = 5000e6;
+        _seedPrime(amount);
+
+        uint256 supplyBefore = IERC20(phUSD).totalSupply();
+        uint256 wbtcBefore = IERC20(WBTC).balanceOf(address(dispatcher));
+
+        vm.recordLogs();
+        vm.prank(authorizedPooler);
+        dispatcher.pool(amount, 0, 0, 0, 0, 0);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        (
+            uint256 primeSpent,
+            uint256 phusdAcquired,
+            uint256 phusdBurned,
+            uint256 wbtcAcquired,
+            uint256 liquidity
+        ) = _extractPooled(logs);
+
+        // Event outcome fields.
+        assertEq(primeSpent, amount, "primeSpent == amountIn");
+        assertGt(phusdAcquired, 0, "phUSD acquired on Leg A");
+        assertEq(phusdBurned, phusdAcquired / 2, "half the acquired phUSD burned");
+        assertGt(wbtcAcquired, 0, "WBTC acquired on Leg C");
+        assertGt(liquidity, 0, "LP minted");
+
+        // Burn is a real supply cut of exactly the burned half.
+        uint256 supplyAfter = IERC20(phUSD).totalSupply();
+        assertEq(supplyBefore - supplyAfter, phusdBurned, "totalSupply drops by the burned half");
+
+        // WBTC (8dp) acquired and retained on the dispatcher (NOT pooled).
+        uint256 wbtcAfter = IERC20(WBTC).balanceOf(address(dispatcher));
+        assertEq(wbtcAfter - wbtcBefore, wbtcAcquired, "WBTC reserve rose by wbtcAcquired");
+
+        // USDC fully consumed across the three legs (60 + 30 + 10 == 100).
+        assertEq(IERC20(USDC).balanceOf(address(dispatcher)), 0, "USDC fully consumed");
+
+        // Pooled phUSD ≈ pooled promotion: the router refund leaves only tiny phUSD/promo dust.
+        assertLt(IERC20(phUSD).balanceOf(address(dispatcher)), phusdBurned / 100, "negligible phUSD dust");
+    }
+
+    function test_pool_wbtcNotAddedToLP_stillMintsLP() public {
+        uint256 amount = 5000e6;
+        _seedPrime(amount);
+        uint256 lpBefore = IERC20(phusdPromoPair).balanceOf(address(dispatcher));
+
+        vm.prank(authorizedPooler);
+        dispatcher.pool(amount, 0, 0, 0, 1, 0);
+
+        // The phUSD/promotion LP minted, and WBTC stayed resident (never routed into the pair).
+        assertGt(IERC20(phusdPromoPair).balanceOf(address(dispatcher)), lpBefore, "LP minted");
+        assertGt(IERC20(WBTC).balanceOf(address(dispatcher)), 0, "WBTC retained on dispatcher");
+    }
+
+    function test_pool_wbtcRoute_rerouteViaWETH() public {
+        uint256 amount = 5000e6;
+        _seedPrime(amount);
+
+        address[] memory viaWeth = new address[](3);
+        viaWeth[0] = USDC;
+        viaWeth[1] = WETH;
+        viaWeth[2] = WBTC;
+        dispatcher.setUsdcToWbtcPath(viaWeth);
+
+        vm.recordLogs();
+        vm.prank(authorizedPooler);
+        dispatcher.pool(amount, 0, 0, 0, 0, 0);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        (,,, uint256 wbtcAcquired,) = _extractPooled(logs);
+
+        assertGt(wbtcAcquired, 0, "WBTC acquired via the WETH reroute");
+        assertEq(IERC20(WBTC).balanceOf(address(dispatcher)), wbtcAcquired, "reserve holds the rerouted WBTC");
+    }
+
+    // =====================================================================
+    // insurer / withdrawWBTC
+    // =====================================================================
+
+    function test_setInsurer_storesAndEmits() public {
+        address ins = address(0x1571);
+        vm.expectEmit(false, false, false, true);
+        emit PromotionUniV2_Eth.InsurerSet(ins);
+        dispatcher.setInsurer(ins);
+        assertEq(dispatcher.insurer(), ins);
+    }
+
+    function test_setInsurer_revertsZero() public {
+        vm.expectRevert("PromotionUniV2_Eth: zero insurer");
+        dispatcher.setInsurer(address(0));
+    }
+
+    function test_setInsurer_revertsForNonOwner() public {
+        vm.prank(nonOwner);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
+        dispatcher.setInsurer(address(0x1571));
+    }
+
+    function test_insurer_defaultsToZero_locksWithdraw() public {
+        // Reserve funded, but no insurer set — nobody can withdraw (address(0) can never be msg.sender).
+        deal(WBTC, address(dispatcher), 1e8);
+        assertEq(dispatcher.insurer(), address(0));
+        vm.prank(nonOwner);
+        vm.expectRevert("PromotionUniV2_Eth: not insurer");
+        dispatcher.withdrawWBTC(nonOwner, 1e8);
+    }
+
+    function test_withdrawWBTC_revertsForNonInsurer() public {
+        address ins = address(0x1571);
+        dispatcher.setInsurer(ins);
+        deal(WBTC, address(dispatcher), 1e8);
+        // Owner is not the insurer either.
+        vm.expectRevert("PromotionUniV2_Eth: not insurer");
+        dispatcher.withdrawWBTC(owner, 1e8);
+    }
+
+    function test_withdrawWBTC_insurerMovesReserveAndEmits() public {
+        address ins = address(0x1571);
+        address to = address(0xB70C);
+        uint256 amount = 3e7; // 0.3 WBTC (8dp)
+        dispatcher.setInsurer(ins);
+        deal(WBTC, address(dispatcher), 1e8);
+
+        vm.expectEmit(true, false, false, true);
+        emit PromotionUniV2_Eth.WBTCWithdrawn(to, amount);
+        vm.prank(ins);
+        dispatcher.withdrawWBTC(to, amount);
+
+        assertEq(IERC20(WBTC).balanceOf(to), amount, "WBTC (8dp) moved to recipient");
+        assertEq(IERC20(WBTC).balanceOf(address(dispatcher)), 1e8 - amount, "reserve debited");
+    }
+
+    function test_withdrawWBTC_revertsZeroRecipient() public {
+        address ins = address(0x1571);
+        dispatcher.setInsurer(ins);
+        deal(WBTC, address(dispatcher), 1e8);
+        vm.prank(ins);
+        vm.expectRevert("PromotionUniV2_Eth: zero recipient");
+        dispatcher.withdrawWBTC(address(0), 1e8);
+    }
+
+    // =====================================================================
+    // rescueERC20 — WBTC excluded
+    // =====================================================================
+
+    function test_rescueERC20_revertsForWBTC() public {
+        deal(WBTC, address(dispatcher), 1e8);
+        vm.expectRevert("PromotionUniV2_Eth: WBTC is insurer-only");
+        dispatcher.rescueERC20(WBTC, owner, 1e8);
+    }
+
+    function test_rescueERC20_stillWorksForNonWBTC() public {
+        // The WBTC guard does not block other tokens (e.g. the LP token / phUSD / USDC).
+        deal(phUSD, address(dispatcher), 1000e18);
+        address to = address(0xF00D);
+        dispatcher.rescueERC20(phUSD, to, 1000e18);
+        assertEq(IERC20(phUSD).balanceOf(to), 1000e18);
     }
 }
