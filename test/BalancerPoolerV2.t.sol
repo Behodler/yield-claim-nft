@@ -21,6 +21,8 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {MockERC4626} from "./mocks/MockERC4626.sol";
 import {MockERC4626Wrapper} from "./mocks/MockERC4626Wrapper.sol";
 import {MockSkyPSM} from "./mocks/MockSkyPSM.sol";
+import {MockNudgeBatchMinter} from "./mocks/MockNudgeBatchMinter.sol";
+import {NudgeStreamer} from "phoenix-nft-staking/NudgeStreamer.sol";
 
 /// @dev Mock ERC20 with configurable decimals for testing.
 contract MockERC20 is ERC20 {
@@ -138,9 +140,7 @@ contract MockBalancerVault {
         lastSwapUserData = params.userData;
 
         amountInRaw = params.amountGivenRaw;
-        amountOutRaw = configurableSwapOut > 0
-            ? configurableSwapOut
-            : (params.amountGivenRaw * swapRateBps) / 10000;
+        amountOutRaw = configurableSwapOut > 0 ? configurableSwapOut : (params.amountGivenRaw * swapRateBps) / 10000;
         amountCalculatedRaw = 0;
 
         // Real V3 Vault behaviour: credit tokenOut to the caller's internal balance
@@ -156,10 +156,7 @@ contract MockBalancerVault {
     ///      the vault to the recipient. Reverts if the caller hasn't credited
     ///      enough via a prior `swap`.
     function sendTo(IERC20 token, address to, uint256 amount) external {
-        require(
-            internalBalance[address(token)] >= amount,
-            "MockBalancerVault: insufficient credit"
-        );
+        require(internalBalance[address(token)] >= amount, "MockBalancerVault: insufficient credit");
         internalBalance[address(token)] -= amount;
         token.safeTransfer(to, amount);
     }
@@ -269,6 +266,12 @@ contract BalancerPoolerV2Test is Test {
         );
         pooler.setMinter(minter);
         pooler.setAuthorizedPooler(authorizedPooler, true);
+
+        // Story 047: the donation now hops through a real NudgeStreamer, so the whole nudge
+        // stack (USDC + PSM + batch-minter + streamer) is stood up eagerly and the pooler is
+        // pointed at the streamer. Tests that need an UNWIRED pooler build a fresh one.
+        _ensurePSM();
+        pooler.setNudgeStreamer(address(streamer));
     }
 
     // =========================================================================
@@ -813,8 +816,7 @@ contract BalancerPoolerV2Test is Test {
         pooler.dispatch(minter, amount, "");
 
         assertFalse(
-            mockVault.addLiquidityCalled(),
-            "H-02: addLiquidity must NOT fire during dispatch (empty extraData)"
+            mockVault.addLiquidityCalled(), "H-02: addLiquidity must NOT fire during dispatch (empty extraData)"
         );
 
         // Scenario 2: non-empty extraData (attacker-supplied low slippage)
@@ -825,8 +827,7 @@ contract BalancerPoolerV2Test is Test {
         pooler.dispatch(minter, amount, abi.encode(uint256(0)));
 
         assertFalse(
-            mockVault.addLiquidityCalled(),
-            "H-02: addLiquidity must NOT fire during dispatch (extraData with 0 minBPT)"
+            mockVault.addLiquidityCalled(), "H-02: addLiquidity must NOT fire during dispatch (extraData with 0 minBPT)"
         );
 
         // Verify sUSDS accumulated but no Balancer interaction occurred
@@ -1066,14 +1067,20 @@ contract BalancerPoolerV2Test is Test {
         assertEq(phUSD.mintCallCount(), 1, "exactly one mint call");
     }
 
-
     // =========================================================================
     // Story-034: PSM donation — config setters
     // =========================================================================
 
-    address public batchMinter = address(0xBA7C);
+    /// @dev Story 047: the nudge sink can no longer be a plain EOA — `registerStream` calls
+    ///      `isNudgeToken(token)` on it, so it must be a contract. `batchMinter` is assigned in
+    ///      `_ensurePSM()` (invoked from `setUp`).
+    address public batchMinter;
+    MockNudgeBatchMinter public batchMinterMock;
+    NudgeStreamer public streamer;
     MockERC20 public usdc;
     MockSkyPSM public psm;
+
+    uint256 internal constant STREAM_DURATION = 1000;
 
     /// @dev Helper: seed sUSDS onto the pooler by minting USDS + dispatching.
     function _seedSUSDS(uint256 amount) internal {
@@ -1082,7 +1089,10 @@ contract BalancerPoolerV2Test is Test {
         pooler.dispatch(minter, amount, "");
     }
 
-    /// @dev Lazily deploy the USDC token + Sky PSM mock and fund the PSM reserve.
+    /// @dev Deploy the USDC token + Sky PSM mock, fund the PSM reserve, and stand up the nudge
+    ///      stack (batch-minter sink + streamer) in the documented ops order: whitelist the
+    ///      nudge token on the sink FIRST, then `registerStream` (reversing the two reverts
+    ///      `NudgeStreamer__NotWhitelisted`).
     function _ensurePSM() internal {
         if (address(usdc) == address(0)) {
             usdc = new MockERC20("USD Coin", "USDC", 6);
@@ -1092,16 +1102,32 @@ contract BalancerPoolerV2Test is Test {
             usdc.mint(address(this), 1_000_000e6);
             usdc.approve(address(psm), type(uint256).max);
             psm.fundReserve(1_000_000e6);
+
+            batchMinterMock = new MockNudgeBatchMinter();
+            batchMinterMock.setNudgeToken(address(usdc), true);
+            batchMinter = address(batchMinterMock);
+
+            streamer = new NudgeStreamer(owner);
+            streamer.registerStream(batchMinter, address(usdc), STREAM_DURATION);
         }
     }
 
     /// @dev Wire donation config: batchMinter + PSM + size. Donation happens in _dispatch,
-    ///      so this must be set BEFORE the dispatch that should donate.
+    ///      so this must be set BEFORE the dispatch that should donate. The streamer is
+    ///      already wired in `setUp`.
     function _wireDonation(uint256 size) internal {
         _ensurePSM();
         pooler.setBatchMinter(batchMinter);
         pooler.setPSM(address(psm));
         pooler.setBatchDonationSize(size);
+    }
+
+    /// @dev A pooler with no `nudgeStreamer` configured, otherwise identical to `pooler`.
+    function _freshPooler() internal returns (BalancerPoolerV2 fresh) {
+        fresh = new BalancerPoolerV2(
+            address(sUsds), address(bptToken), address(mockVault), address(mockRouter), true, owner
+        );
+        fresh.setMinter(minter);
     }
 
     // Mirror contract events for vm.expectEmit.
@@ -1140,6 +1166,17 @@ contract BalancerPoolerV2Test is Test {
             }
         }
         assertTrue(found, "DonationSkipped not emitted");
+    }
+
+    /// @dev Inverse of `_assertDonationSkipped`: proves the donation path completed cleanly
+    ///      (or short-circuited) rather than being swallowed by the try/catch.
+    function _assertNoDonationSkipped(Vm.Log[] memory logs) internal view {
+        bytes32 sig = keccak256("DonationSkipped(uint256)");
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter == address(pooler) && logs[i].topics[0] == sig) {
+                revert("DonationSkipped emitted but the donation was expected to be a clean no-op");
+            }
+        }
     }
 
     function test_setPSM_revertsOnZero() public {
@@ -1228,6 +1265,37 @@ contract BalancerPoolerV2Test is Test {
     }
 
     // =========================================================================
+    // Story-047: setNudgeStreamer
+    // =========================================================================
+
+    function test_setNudgeStreamer_revertsOnZero() public {
+        vm.expectRevert("BalancerPoolerV2: zero nudgeStreamer");
+        pooler.setNudgeStreamer(address(0));
+    }
+
+    function test_setNudgeStreamer_revertsForNonOwner() public {
+        vm.prank(nonOwner);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
+        pooler.setNudgeStreamer(address(0xB0B));
+    }
+
+    function test_setNudgeStreamer_storesAndEmits() public {
+        BalancerPoolerV2 fresh = _freshPooler();
+        assertEq(fresh.nudgeStreamer(), address(0), "starts unset");
+
+        vm.expectEmit(true, true, false, false);
+        emit BalancerPoolerV2.NudgeStreamerUpdated(address(0), address(streamer));
+        fresh.setNudgeStreamer(address(streamer));
+        assertEq(fresh.nudgeStreamer(), address(streamer), "streamer stored");
+
+        // Repointing reports the previous streamer as `oldStreamer`.
+        vm.expectEmit(true, true, false, false);
+        emit BalancerPoolerV2.NudgeStreamerUpdated(address(streamer), address(0xB0B));
+        fresh.setNudgeStreamer(address(0xB0B));
+        assertEq(fresh.nudgeStreamer(), address(0xB0B), "streamer repointed");
+    }
+
+    // =========================================================================
     // Story-034: _dispatch — donation disabled => full amount wrapped
     // =========================================================================
 
@@ -1292,8 +1360,41 @@ contract BalancerPoolerV2Test is Test {
 
         // 90% wrapped to sUSDS (1:1 rate), donation share converted to USDC.
         assertEq(sUsds.balanceOf(address(pooler)), 900e18, "90% wrapped to sUSDS");
-        assertEq(usdc.balanceOf(batchMinter), 100e6, "10% donated as USDC at 1:1 (18->6 decimals)");
+        assertEq(usdc.balanceOf(address(streamer)), 100e6, "10% donated as USDC at 1:1 (18->6 decimals)");
+        assertEq(usdc.balanceOf(batchMinter), 0, "story 047: USDC buffers in the streamer, not the sink");
+        assertEq(usdc.balanceOf(address(pooler)), 0, "pooler keeps no USDC");
         assertEq(usds.balanceOf(address(pooler)), 0, "no USDS parked on success");
+    }
+
+    /// @dev Story 047: the PSM delivers to the POOLER, which streams it on. The batch-minter is
+    ///      paid linearly out of the streamer's buffer, not in a lump on dispatch.
+    function test_dispatch_donation_buffersInStreamerAndReleasesLinearly() public {
+        _wireDonation(100);
+
+        uint256 amount = 100e18; // 100% donation => 100e6 USDC
+        _seedSUSDS(amount);
+
+        (uint256 duration, uint256 buffer, uint256 rewardPerSecond,) = streamer.streams(batchMinter, address(usdc));
+        assertEq(duration, STREAM_DURATION, "duration untouched by a deposit");
+        assertEq(buffer, 100e6, "streamer buffers the whole donation");
+        assertEq(rewardPerSecond, (100e6 * 1e18) / STREAM_DURATION, "rate recomputed over the full window");
+        assertEq(usdc.balanceOf(batchMinter), 0, "nothing settled to the sink yet");
+
+        // Half the window elapses -> half the donation is claimable, and a flush delivers it.
+        vm.warp(block.timestamp + STREAM_DURATION / 2);
+        assertApproxEqAbs(streamer.pendingStream(batchMinter, address(usdc)), 50e6, 1, "half accrued");
+        batchMinterMock.flush(address(streamer), address(usdc));
+        assertApproxEqAbs(usdc.balanceOf(batchMinter), 50e6, 1, "flush delivers the accrued half");
+    }
+
+    /// @dev The approval handed to the streamer is the EXACT gemAmt and is fully consumed by
+    ///      `collectNudge` in the same call — never an infinite approval, never a residual.
+    function test_dispatch_donation_leavesNoResidualStreamerAllowance() public {
+        _wireDonation(100);
+        _seedSUSDS(100e18);
+
+        assertEq(usdc.allowance(address(pooler), address(streamer)), 0, "streamer allowance fully consumed");
+        assertEq(usds.allowance(address(pooler), address(psm)), 0, "PSM allowance tidied");
     }
 
     function test_dispatch_donationDecimals18to6_exact() public {
@@ -1303,7 +1404,7 @@ contract BalancerPoolerV2Test is Test {
         uint256 amount = 1e18;
         _seedSUSDS(amount);
 
-        assertEq(usdc.balanceOf(batchMinter), 1e6, "1e18 USDS -> 1e6 USDC exact");
+        assertEq(usdc.balanceOf(address(streamer)), 1e6, "1e18 USDS -> 1e6 USDC exact");
         assertEq(sUsds.balanceOf(address(pooler)), 0, "nothing wrapped at 100% donation");
     }
 
@@ -1325,7 +1426,7 @@ contract BalancerPoolerV2Test is Test {
         uint256 amount = 101e18;
         _seedSUSDS(amount);
 
-        assertEq(usdc.balanceOf(batchMinter), 100e6, "tout fee reduces USDC out (100e6 for 101e18 in)");
+        assertEq(usdc.balanceOf(address(streamer)), 100e6, "tout fee reduces USDC out (100e6 for 101e18 in)");
         // usdsSpent = 100e6 * 1e12 * 1.01 = 101e18 exactly; no dust this case.
         assertEq(usds.balanceOf(address(pooler)), 0, "exact spend leaves no USDS");
     }
@@ -1339,13 +1440,18 @@ contract BalancerPoolerV2Test is Test {
         uint256 expectedGem = (amount * 1e18) / (1e12 * (1e18 + 0.01e18));
         _seedSUSDS(amount);
 
-        assertEq(usdc.balanceOf(batchMinter), expectedGem, "USDC out is floored gemAmt");
+        assertEq(usdc.balanceOf(address(streamer)), expectedGem, "USDC out is floored gemAmt");
         // usdsSpent = expectedGem * 1e12 * 1.01; dust = amount - usdsSpent stays parked.
         uint256 usdsSpent = expectedGem * 1e12 * (1e18 + 0.01e18) / 1e18;
         assertEq(usds.balanceOf(address(pooler)), amount - usdsSpent, "rounding dust stays on contract");
     }
 
-    function test_dispatch_donationRoundsToZeroGem_skipsGracefully() public {
+    /// @dev Story 047: a gemAmt that floors to zero is now a CLEAN no-op behind the
+    ///      `if (gemAmt > 0)` guard, not a caught revert. The guard is load-bearing — without
+    ///      it the call would reach `collectNudge(…, 0)` and revert
+    ///      `NudgeStreamer__ZeroAmount()`, which the catch would then swallow. The sub-unit
+    ///      USDS dust simply stays put and is re-swept on the next dispatch.
+    function test_dispatch_donationRoundsToZeroGem_isCleanNoOp() public {
         _wireDonation(100);
         // Tiny amount whose floored gemAmt is 0: amount < 1e12 USDS -> gemAmt floors to 0.
         uint256 amount = 1e11; // 0.0000001 USDS, < 1e12 conv -> gemAmt = 0
@@ -1353,11 +1459,30 @@ contract BalancerPoolerV2Test is Test {
 
         vm.recordLogs();
         vm.prank(minter);
-        pooler.dispatch(minter, amount, "");
-        _assertDonationSkipped(vm.getRecordedLogs(), amount);
+        pooler.dispatch(minter, amount, ""); // must NOT revert
+        _assertNoDonationSkipped(vm.getRecordedLogs());
 
+        assertEq(usdc.balanceOf(address(streamer)), 0, "no donation when gem floors to 0");
         assertEq(usdc.balanceOf(batchMinter), 0, "no donation when gem floors to 0");
-        assertEq(usds.balanceOf(address(pooler)), amount, "dust USDS parked");
+        assertEq(usds.balanceOf(address(pooler)), amount, "sub-unit dust retained for the next sweep");
+    }
+
+    /// @dev The other zero case: donation fully enabled but there is no USDS to sweep. The
+    ///      `remainingUSDS > 0` guard in `_dispatch` short-circuits before `_psmDonate`, so
+    ///      nothing reverts, nothing is parked and no `DonationSkipped` is emitted.
+    function test_dispatch_zeroDonationSweep_isCleanNoOp() public {
+        _wireDonation(100);
+        assertEq(usds.balanceOf(address(pooler)), 0, "pooler starts empty");
+
+        vm.recordLogs();
+        vm.prank(minter);
+        pooler.dispatch(minter, 0, "");
+        _assertNoDonationSkipped(vm.getRecordedLogs());
+
+        assertEq(usds.balanceOf(address(pooler)), 0, "nothing parked");
+        assertEq(usdc.balanceOf(address(streamer)), 0, "nothing streamed");
+        (, uint256 buffer,,) = streamer.streams(batchMinter, address(usdc));
+        assertEq(buffer, 0, "streamer untouched");
     }
 
     function test_psmDonate_revertsForExternalCaller() public {
@@ -1391,6 +1516,7 @@ contract BalancerPoolerV2Test is Test {
         // Pooling portion still wrapped; donation USDS parked; no USDC moved.
         assertEq(sUsds.balanceOf(address(pooler)), 800e18, "pooling portion still wrapped");
         assertEq(usds.balanceOf(address(pooler)), 200e18, "donation USDS parked on contract");
+        assertEq(usdc.balanceOf(address(streamer)), 0, "no USDC donated on PSM failure");
         assertEq(usdc.balanceOf(batchMinter), 0, "no USDC donated on PSM failure");
     }
 
@@ -1408,7 +1534,77 @@ contract BalancerPoolerV2Test is Test {
 
         assertEq(sUsds.balanceOf(address(pooler)), 800e18, "pooling portion wrapped");
         assertEq(usds.balanceOf(address(pooler)), 200e18, "donation USDS parked when tout too high");
-        assertEq(usdc.balanceOf(batchMinter), 0, "no donation when tout exceeds ceiling");
+        assertEq(usdc.balanceOf(address(streamer)), 0, "no donation when tout exceeds ceiling");
+    }
+
+    // =========================================================================
+    // Story-047: streamer misconfiguration is CAUGHT (the isolation contract holds)
+    // =========================================================================
+
+    /// @dev `nudgeStreamer` unset on a LIVE donation: `_psmDonate` reverts on our own require,
+    ///      the envelope swallows it, the USDS parks and the mint still succeeds. Quiet by
+    ///      design — the documented, accepted consequence of preserving failure isolation.
+    function test_dispatch_streamerUnset_donationCaughtAndParked() public {
+        _ensurePSM();
+        BalancerPoolerV2 fresh = _freshPooler();
+        fresh.setBatchMinter(batchMinter);
+        fresh.setPSM(address(psm));
+        fresh.setBatchDonationSize(20);
+        assertEq(fresh.nudgeStreamer(), address(0), "streamer starts unset");
+
+        uint256 amount = 1000e18;
+        usds.mint(address(fresh), amount);
+
+        vm.prank(minter);
+        fresh.dispatch(minter, amount, ""); // must NOT revert
+
+        assertEq(sUsds.balanceOf(address(fresh)), 800e18, "pooling portion still wrapped");
+        assertEq(usds.balanceOf(address(fresh)), 200e18, "donation USDS parked when streamer unset");
+        assertEq(usdc.balanceOf(address(streamer)), 0, "no USDC moved");
+        assertEq(usdc.balanceOf(batchMinter), 0, "no USDC moved");
+
+        // Wiring the streamer and dispatching again drains the parked backlog.
+        fresh.setNudgeStreamer(address(streamer));
+        vm.prank(minter);
+        fresh.dispatch(minter, 0, "");
+        assertEq(usdc.balanceOf(address(streamer)), 200e6, "parked USDS recovered once wired");
+        assertEq(usds.balanceOf(address(fresh)), 0, "backlog drained");
+    }
+
+    /// @dev Streamer wired but ops forgot `registerStream(batchMinter, USDC, duration)`:
+    ///      `collectNudge` reverts `NudgeStreamer__NotRegistered()`, which is likewise caught.
+    function test_dispatch_streamNotRegistered_donationCaughtAndParked() public {
+        _wireDonation(20);
+        NudgeStreamer unregistered = new NudgeStreamer(owner);
+        pooler.setNudgeStreamer(address(unregistered));
+
+        uint256 amount = 1000e18;
+        usds.mint(address(pooler), amount);
+
+        vm.recordLogs();
+        vm.prank(minter);
+        pooler.dispatch(minter, amount, ""); // must NOT revert
+        _assertDonationSkipped(vm.getRecordedLogs(), 200e18);
+
+        assertEq(sUsds.balanceOf(address(pooler)), 800e18, "pooling portion still wrapped");
+        assertEq(usds.balanceOf(address(pooler)), 200e18, "donation USDS parked when stream unregistered");
+        assertEq(usdc.balanceOf(address(unregistered)), 0, "no USDC reached the unregistered streamer");
+        assertEq(usdc.balanceOf(batchMinter), 0, "no USDC reached the sink");
+    }
+
+    /// @dev A donation-disabled pooler must stay deployable AND dispatchable with no streamer
+    ///      configured — the streamer requirement lives on the live-donation branch only.
+    function test_dispatch_donationDisabled_needsNoStreamer() public {
+        BalancerPoolerV2 fresh = _freshPooler();
+        assertEq(fresh.nudgeStreamer(), address(0), "streamer deliberately unset");
+
+        uint256 amount = 1000e18;
+        usds.mint(address(fresh), amount);
+        vm.prank(minter);
+        fresh.dispatch(minter, amount, "");
+
+        assertEq(sUsds.balanceOf(address(fresh)), amount, "full amount wrapped, no streamer needed");
+        assertEq(usds.balanceOf(address(fresh)), 0, "nothing parked");
     }
 
     function test_dispatch_raisingMaxTout_allowsHigherToutDonation() public {
@@ -1420,7 +1616,7 @@ contract BalancerPoolerV2Test is Test {
         usds.mint(address(pooler), amount);
         vm.prank(minter);
         pooler.dispatch(minter, amount, "");
-        assertEq(usdc.balanceOf(batchMinter), 0, "skipped at 1% ceiling");
+        assertEq(usdc.balanceOf(address(streamer)), 0, "skipped at 1% ceiling");
         assertEq(usds.balanceOf(address(pooler)), amount, "parked at 1% ceiling");
 
         // Owner raises the ceiling; next dispatch sweeps the parked USDS and donates.
@@ -1434,7 +1630,7 @@ contract BalancerPoolerV2Test is Test {
 
         // The whole parked 1000e18 is now swept: gemAmt = floor(1000e18 / 1.02e12).
         uint256 expectedGem = (amount * 1e18) / (1e12 * (1e18 + 0.02e18));
-        assertEq(usdc.balanceOf(batchMinter), expectedGem, "donated after raising maxTout");
+        assertEq(usdc.balanceOf(address(streamer)), expectedGem, "donated after raising maxTout");
     }
 
     // =========================================================================
@@ -1459,7 +1655,7 @@ contract BalancerPoolerV2Test is Test {
         // stranded 200e18 + new 100e18 = 300e18 USDS -> 300e6 USDC.
         _seedSUSDS(500e18);
 
-        assertEq(usdc.balanceOf(batchMinter), 300e6, "stranded + new donation swept together");
+        assertEq(usdc.balanceOf(address(streamer)), 300e6, "stranded + new donation swept together");
         assertEq(usds.balanceOf(address(pooler)), 0, "no USDS left after healthy sweep");
         // sUSDS: 800e18 (first pooling) + 400e18 (second pooling) = 1200e18.
         assertEq(sUsds.balanceOf(address(pooler)), 1200e18, "pooling portions accumulated");

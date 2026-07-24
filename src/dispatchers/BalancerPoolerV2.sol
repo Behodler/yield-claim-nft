@@ -11,6 +11,7 @@ import {IBalancerVault} from "../interfaces/balancer/IBalancerVault.sol";
 import {IBalancerRouter} from "../interfaces/balancer/IBalancerRouter.sol";
 import {IUnlockCallback} from "../interfaces/balancer/IUnlockCallback.sol";
 import {AddLiquidityParams, AddLiquidityKind} from "../interfaces/balancer/BalancerTypes.sol";
+import {INudgeStreamer} from "phoenix-nft-staking/INudgeStreamer.sol";
 
 /// @title BalancerPoolerV2
 /// @notice A V2 token dispatcher that wraps USDS into sUSDS on dispatch, then allows an
@@ -29,6 +30,45 @@ import {AddLiquidityParams, AddLiquidityKind} from "../interfaces/balancer/Balan
 ///      external call wrapped in try/catch so a PSM outage can never revert the mint: the
 ///      un-donated USDS simply parks on the contract and is re-swept on the next dispatch.
 ///      `pool()` becomes a pure LP add (its `minUSDC` arg is removed).
+///
+///      ### Story-047: the donation is routed through the NudgeStreamer
+///
+///      The PSM no longer delivers USDC straight to `batchMinter`. It delivers to **this
+///      contract**, which then `forceApprove`s the exact `gemAmt` to `nudgeStreamer` and calls
+///      `collectNudge(batchMinter, gem, gemAmt)`. The streamer buffers the USDC and releases it
+///      linearly to `batchMinter` over the registered stream duration, so the batch-minter is
+///      paid over time rather than in a lump on each dispatch. The approval is always the exact
+///      amount and is fully consumed inside the same call — never an infinite approval.
+///
+///      **The streamer is mandatory on the live-donation branch only.** `nudgeStreamer` is a
+///      setter-only field (it starts `address(0)`, because the streamer is deployed after the
+///      pooler), so a donation-disabled pooler (`batchMinter == 0`, `psm == 0`, or
+///      `batchDonationSize == 0`) remains fully deployable and dispatchable with no streamer
+///      configured. Only a live donation requires one.
+///
+///      **The set of caught failures WIDENS — deliberately.** `_psmDonate` stays wrapped in the
+///      `try this._psmDonate{} catch` failure-isolation envelope, and that envelope is the point:
+///      a broken donation must never revert a mint. The new reverts it will now swallow are
+///        * `"BalancerPoolerV2: nudgeStreamer unset"` — streamer never wired;
+///        * `NudgeStreamer__NotRegistered()` — `(batchMinter, gem)` has no registered stream;
+///        * `NudgeStreamer__NotWhitelisted()` — reachable via `registerStream`, not here;
+///      each of which now parks the swept USDS on the contract and emits `DonationSkipped`
+///      instead of reverting. This means a **streamer misconfiguration is quiet**: watch
+///      `DonationSkipped` and the contract's USDS balance. This is the accepted consequence of
+///      preserving the isolation contract, NOT a silent-failure bug. The USDS is not lost — the
+///      next dispatch re-sweeps it, so fixing the config and dispatching again drains the backlog.
+///      A `gemAmt` that floors to zero is short-circuited by an `if (gemAmt > 0)` guard rather
+///      than left to revert `NudgeStreamer__ZeroAmount()`, so a dust-sized donation is a clean
+///      no-op.
+///
+///      **Required ops ordering** (reversing the first two reverts `NudgeStreamer__NotWhitelisted`):
+///        1. `batchMinter.setNudgeTokenWhitelist(gem /* USDC */, true)`
+///        2. `nudgeStreamer.registerStream(batchMinter, gem, duration)`
+///        3. `this.setNudgeStreamer(nudgeStreamer)`
+///
+///      **Gas:** the PSM output now takes an extra hop (PSM -> pooler -> streamer) plus the
+///      streamer's own settle transfer to `batchMinter`, so a donating dispatch is measurably
+///      more expensive and now depends on external streamer state.
 contract BalancerPoolerV2 is ATokenDispatcherV2, IUnlockCallback {
     using SafeERC20 for IERC20;
 
@@ -65,6 +105,11 @@ contract BalancerPoolerV2 is ATokenDispatcherV2, IUnlockCallback {
     ///      been ~0 (source: makerdao/dss-lite-psm; Sky PSM docs).
     uint256 public maxTout = 0.01e18;
 
+    /// @notice The NudgeStreamer that buffers the donated USDC and releases it linearly to
+    ///         `batchMinter`. Setter-only (starts `address(0)`); mandatory on the live-donation
+    ///         branch only — see the contract-level dev notes.
+    address public nudgeStreamer;
+
     event PoolerAuthorized(address indexed pooler, uint256 atAuthVersion);
     event PoolerDeauthorized(address indexed pooler);
     event AuthVersionIncremented(uint256 newAuthVersion);
@@ -75,8 +120,13 @@ contract BalancerPoolerV2 is ATokenDispatcherV2, IUnlockCallback {
     event PSMSet(address newPSM);
     event MaxToutSet(uint256 newMaxTout);
 
+    /// @notice Emitted when the nudgeStreamer address is updated.
+    event NudgeStreamerUpdated(address indexed oldStreamer, address indexed newStreamer);
+
     /// @notice Emitted on a successful PSM donation. `usdsSpent` is the USDS pulled by the PSM
-    ///         (incl. tout fee); `usdcDonated` is the USDC delivered to `batchMinter`.
+    ///         (incl. tout fee); `usdcDonated` is the USDC handed to the `nudgeStreamer` for
+    ///         linear release to `batchMinter` (story 047 — it no longer lands on the
+    ///         batch-minter in this transaction).
     event BatchDonatedViaPSM(uint256 usdsSpent, uint256 usdcDonated, address indexed batchMinter);
 
     /// @notice Emitted when a donation attempt is silently skipped (PSM outage / fee spike /
@@ -187,8 +237,22 @@ contract BalancerPoolerV2 is ATokenDispatcherV2, IUnlockCallback {
         emit MaxToutSet(newMaxTout);
     }
 
+    /// @notice Updates the NudgeStreamer the PSM donation is routed through. Only callable by
+    ///         the owner. Must be non-zero (there is no "unset" path — a pooler that should not
+    ///         donate is disabled via `setBatchMinter(0)` / `setBatchDonationSize(0)`).
+    /// @dev Wire this LAST: the streamer must already have `registerStream(batchMinter, gem, …)`
+    ///      called on it, which in turn requires the batch-minter to have whitelisted the gem.
+    /// @param newStreamer The new streamer address. Must be non-zero.
+    function setNudgeStreamer(address newStreamer) external onlyOwner {
+        require(newStreamer != address(0), "BalancerPoolerV2: zero nudgeStreamer");
+        address old = nudgeStreamer;
+        nudgeStreamer = newStreamer;
+        emit NudgeStreamerUpdated(old, newStreamer);
+    }
+
     /// @notice Dispatches tokens: wraps the pooling portion of USDS into sUSDS, then attempts
-    ///         a silent PSM donation of the remaining raw USDS to `batchMinter`.
+    ///         a silent PSM donation of the remaining raw USDS toward `batchMinter` via the
+    ///         `nudgeStreamer`.
     /// @dev Donation is carved out **only when enabled** (batchMinter + psm set, size > 0); when
     ///      disabled the full `amount` is wrapped so nothing is stranded. The donation sweeps
     ///      `balanceOf(USDS)` — not just this dispatch's share — so USDS stranded by a prior
@@ -231,11 +295,16 @@ contract BalancerPoolerV2 is ATokenDispatcherV2, IUnlockCallback {
         }
     }
 
-    /// @notice Failure-isolated USDS->USDC donation via the Sky PSM. Self-gated `external` so
-    ///         any revert (tout ceiling, empty reserve, rounding-to-zero, short reserve) rolls
-    ///         back the entire approve+buyGem atomically — the `_dispatch` try/catch then
-    ///         leaves the swept USDS untouched.
+    /// @notice Failure-isolated USDS->USDC donation via the Sky PSM, streamed to `batchMinter`
+    ///         through the `nudgeStreamer`. Self-gated `external` so any revert (tout ceiling,
+    ///         empty reserve, short reserve, streamer unset, stream not registered) rolls back
+    ///         the entire approve+buyGem+collectNudge atomically — the `_dispatch` try/catch
+    ///         then leaves the swept USDS untouched (parked for the next dispatch to retry).
     /// @dev MUST be called only via `try this._psmDonate{}` from `_dispatch`.
+    /// @dev Story 047: the streamer hop lives INSIDE this envelope on purpose. A streamer
+    ///      misconfiguration therefore parks USDS and emits `DonationSkipped` rather than
+    ///      reverting the mint — quiet, but the deliberate preservation of the isolation
+    ///      contract. See the contract-level dev notes.
     /// @param usdsAmount Raw USDS available to convert (this dispatch's share + any stranded).
     function _psmDonate(uint256 usdsAmount) external {
         require(msg.sender == address(this), "BalancerPoolerV2: only self");
@@ -251,16 +320,34 @@ contract BalancerPoolerV2 is ATokenDispatcherV2, IUnlockCallback {
         // (source: makerdao/dss-lite-psm DssLitePsm._buyGem; conv=to18ConversionFactor=1e12 USDC.)
         uint256 conv = ISkyPSM(psm).to18ConversionFactor();
         uint256 gemAmt = (usdsAmount * WAD) / (conv * (WAD + tout));
-        require(gemAmt > 0, "BalancerPoolerV2: donation dust");
 
-        // Exact USDS the PSM will pull for this gemAmt (<= usdsAmount; remainder is dust).
-        uint256 usdsSpent = gemAmt * conv * (WAD + tout) / WAD;
+        // The `gemAmt > 0` guard is load-bearing, not cosmetic: `collectNudge` reverts
+        // `NudgeStreamer__ZeroAmount()` on a zero amount, so a dust-sized sweep whose gemAmt
+        // floors to zero must short-circuit to a clean no-op here rather than propagate a
+        // revert into the caller's catch. The dust USDS simply stays put and is re-swept on the
+        // next dispatch, exactly as before.
+        if (gemAmt > 0) {
+            // Exact USDS the PSM will pull for this gemAmt (<= usdsAmount; remainder is dust).
+            uint256 usdsSpent = gemAmt * conv * (WAD + tout) / WAD;
 
-        IERC20(_primeToken).forceApprove(psm, usdsSpent);
-        ISkyPSM(psm).buyGem(batchMinter, gemAmt); // USDC delivered straight to batchMinter.
-        IERC20(_primeToken).forceApprove(psm, 0); // tidy allowance.
+            IERC20(_primeToken).forceApprove(psm, usdsSpent);
+            // Story 047: USDC lands HERE, not on the batch-minter — it is streamed on below.
+            ISkyPSM(psm).buyGem(address(this), gemAmt);
+            IERC20(_primeToken).forceApprove(psm, 0); // tidy allowance.
 
-        emit BatchDonatedViaPSM(usdsSpent, gemAmt, batchMinter);
+            // Push the freshly-bought USDC through the streamer, which buffers it and releases
+            // it linearly to `batchMinter`. `forceApprove` (not `approve`) with the EXACT
+            // gemAmt because the gem is USDC, which rejects a plain `approve` over a non-zero
+            // residual; `collectNudge` consumes the whole allowance in this same call, so
+            // nothing lingers and no infinite approval is ever handed out.
+            address streamer = nudgeStreamer;
+            require(streamer != address(0), "BalancerPoolerV2: nudgeStreamer unset");
+            address gem = ISkyPSM(psm).gem();
+            IERC20(gem).forceApprove(streamer, gemAmt);
+            INudgeStreamer(streamer).collectNudge(batchMinter, gem, gemAmt);
+
+            emit BatchDonatedViaPSM(usdsSpent, gemAmt, batchMinter);
+        }
     }
 
     /// @notice Pools accumulated sUSDS as a single-sided Balancer V3 LP add. Only callable by
