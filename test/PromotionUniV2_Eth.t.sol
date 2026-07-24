@@ -6,7 +6,12 @@ import {Vm} from "forge-std/Vm.sol";
 import {PromotionUniV2_Eth} from "../src/dispatchers/PromotionUniV2_Eth.sol";
 import {IDispatchHook} from "../src/interfaces/IDispatchHook.sol";
 import {IUniswapV2Router02} from "../src/interfaces/uniswap/IUniswapV2Router02.sol";
+import {NFTMinterV2} from "../src/NFTMinterV2.sol";
+import {GatherV2} from "../src/dispatchers/GatherV2.sol";
 import {MockDispatchHook} from "./mocks/MockDispatchHook.sol";
+import {NudgeStreamer} from "phoenix-nft-staking/NudgeStreamer.sol";
+import {BatchNFTMinterMultiToken} from "phoenix-nft-staking/BatchNFTMinterMultiToken.sol";
+import {ITokenMinterV2 as IStakingTokenMinterV2} from "yield-claim-nft/interfaces/ITokenMinterV2.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -57,8 +62,24 @@ contract PromotionUniV2_EthForkTest is Test {
     address internal owner = address(this);
     address internal minter = address(0xBEEF);
     address internal nonOwner = address(0xCAFE);
-    address internal batchMinterAddr = address(0xD011);
     address internal authorizedPooler = address(0xD00D);
+
+    // ---- story 046: real NudgeStreamer + real MultiToken batch-minter, deployed IN-FORK ----
+    // The streamer is not on mainnet, so there is no deployed address to look up.
+    NudgeStreamer internal streamer;
+    BatchNFTMinterMultiToken internal batch;
+    NFTMinterV2 internal nftMinter;
+    GatherV2 internal payDispatcher;
+
+    /// @dev The batch-minter's own mint currency. MUST differ from the nudge token (USDC) or
+    ///      `setNudgeTokenWhitelist` reverts `BatchMint__RewardTokenIsPaymentToken`.
+    address internal payTokenAddr;
+
+    uint256 internal constant STREAM_DURATION = 1000;
+    uint256 internal constant NUDGE_SIZE = 5;
+
+    /// @dev `batchMinterAddr` is the REAL `BatchNFTMinterMultiToken` deployed in `setUp`.
+    address internal batchMinterAddr;
 
     function setUp() public {
         // Fork mainnet. Prefer an archive RPC via env (accept either MAINNET_RPC_URL or the RPC_MAINNET
@@ -81,6 +102,39 @@ contract PromotionUniV2_EthForkTest is Test {
 
         // Seed the ETH->promo route pair (WETH/promo). USDC/WETH already has deep mainnet liquidity.
         _seedPair(WETH, 100e18, address(promo), 300_000e18);
+
+        _deployNudgeStack();
+    }
+
+    /// @dev Story 046: stands up the REAL nudge stack in-fork and wires it in the documented
+    ///      ops order. `setNudgeTokenWhitelist` derives the payment token via
+    ///      `tokenMinter.configs(dispatcherIndex).dispatcher.primeToken()`, so the minter and
+    ///      dispatcher index must be configured BEFORE the whitelist call, and `registerStream`
+    ///      requires the whitelist entry to already exist.
+    function _deployNudgeStack() internal {
+        // A pay path whose prime token is NOT USDC (USDC is the nudge asset here).
+        MockPromoToken payToken = new MockPromoToken();
+        payTokenAddr = address(payToken);
+
+        nftMinter = new NFTMinterV2(owner);
+        payDispatcher = new GatherV2(payTokenAddr, address(0xFEE5), owner);
+        payDispatcher.setMinter(address(nftMinter));
+        nftMinter.registerDispatcher(address(payDispatcher), 1e18, 0); // index 1
+
+        batch = new BatchNFTMinterMultiToken(owner);
+        streamer = new NudgeStreamer(owner);
+        batchMinterAddr = address(batch);
+
+        batch.setTokenMinter(IStakingTokenMinterV2(address(nftMinter)));
+        batch.setDispatcherIndex(1);
+        batch.setNudgeSize(NUDGE_SIZE);
+        // 1. whitelist on the batch-minter ...
+        batch.setNudgeTokenWhitelist(USDC, true);
+        batch.setNudgeStreamer(address(streamer));
+        // 2. ... then register the stream ...
+        streamer.registerStream(batchMinterAddr, USDC, STREAM_DURATION);
+        // 3. ... then point the donor dispatcher at the streamer.
+        dispatcher.setNudgeStreamer(address(streamer));
     }
 
     // =====================================================================
@@ -309,8 +363,14 @@ contract PromotionUniV2_EthForkTest is Test {
         vm.prank(minter);
         dispatcher.dispatch(minter, amount, "");
 
-        assertEq(IERC20(USDC).balanceOf(batchMinterAddr), 500e6, "50% forwarded");
+        // Story 046: the donation is pulled into the streamer's buffer for `batchMinter`,
+        // not pushed to it. No time has elapsed, so nothing has streamed out yet.
+        assertEq(IERC20(USDC).balanceOf(address(streamer)), 500e6, "50% routed into the streamer");
+        assertEq(IERC20(USDC).balanceOf(batchMinterAddr), 0, "batchMinter receives it only as it streams");
+        (, uint256 buffer,,) = streamer.streams(batchMinterAddr, USDC);
+        assertEq(buffer, 500e6, "stream buffer equals the donation");
         assertEq(IERC20(USDC).balanceOf(address(dispatcher)), 500e6, "remainder retained");
+        assertEq(IERC20(USDC).allowance(address(dispatcher), address(streamer)), 0, "no residual allowance");
     }
 
     function test_dispatch_donationDisabled_batchMinterZero_retainsFull() public {
@@ -334,7 +394,131 @@ contract PromotionUniV2_EthForkTest is Test {
         dispatcher.dispatch(minter, amount, "");
 
         assertEq(IERC20(USDC).balanceOf(batchMinterAddr), 0);
+        assertEq(IERC20(USDC).balanceOf(address(streamer)), 0, "streamer untouched when donation disabled");
         assertEq(IERC20(USDC).balanceOf(address(dispatcher)), amount);
+    }
+
+    // =====================================================================
+    // setNudgeStreamer / streamed donation (story 046)
+    // =====================================================================
+
+    function test_setNudgeStreamer_storesAndEmits() public {
+        address newStreamer = address(0xB0B);
+        vm.expectEmit(true, true, false, true);
+        emit PromotionUniV2_Eth.NudgeStreamerUpdated(address(streamer), newStreamer);
+        dispatcher.setNudgeStreamer(newStreamer);
+        assertEq(dispatcher.nudgeStreamer(), newStreamer);
+    }
+
+    function test_setNudgeStreamer_revertsWithZeroAddress() public {
+        vm.expectRevert("PromotionUniV2_Eth: zero nudgeStreamer");
+        dispatcher.setNudgeStreamer(address(0));
+    }
+
+    function test_setNudgeStreamer_revertsForNonOwner() public {
+        vm.prank(nonOwner);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
+        dispatcher.setNudgeStreamer(address(0xB0B));
+    }
+
+    /// @dev The streamer requirement is scoped to the live-donation branch.
+    function test_dispatch_revertsWhenDonationEnabledAndStreamerUnset() public {
+        PromotionUniV2_Eth fresh = new PromotionUniV2_Eth(address(promo), phusdPromoPair, owner);
+        fresh.setMinter(minter);
+        fresh.setBatchMinter(batchMinterAddr);
+        fresh.setDonationSplit(50);
+        assertEq(fresh.nudgeStreamer(), address(0), "streamer starts unset");
+
+        deal(USDC, address(fresh), 1000e6);
+        vm.prank(minter);
+        vm.expectRevert("PromotionUniV2_Eth: nudgeStreamer unset");
+        fresh.dispatch(minter, 1000e6, "");
+    }
+
+    /// @dev ...so a donation-disabled deployment stays dispatchable with no streamer set.
+    function test_dispatch_donationDisabled_succeedsWithNoStreamerSet() public {
+        PromotionUniV2_Eth fresh = new PromotionUniV2_Eth(address(promo), phusdPromoPair, owner);
+        fresh.setMinter(minter);
+        assertEq(fresh.nudgeStreamer(), address(0), "streamer starts unset");
+
+        deal(USDC, address(fresh), 1000e6);
+        vm.prank(minter);
+        fresh.dispatch(minter, 1000e6, "");
+
+        assertEq(IERC20(USDC).balanceOf(address(fresh)), 1000e6, "full amount retained, no revert");
+    }
+
+    /// @dev Documented ops failure mode: streamer wired but `registerStream` forgotten.
+    function test_dispatch_revertsWhenStreamNotRegistered() public {
+        NudgeStreamer unregistered = new NudgeStreamer(owner);
+        dispatcher.setNudgeStreamer(address(unregistered));
+        _enableDonation(50);
+
+        deal(USDC, address(dispatcher), 1000e6);
+        vm.prank(minter);
+        vm.expectRevert(NudgeStreamer.NudgeStreamer__NotRegistered.selector);
+        dispatcher.dispatch(minter, 1000e6, "");
+    }
+
+    /// @dev The `donationAmount > 0` guard is load-bearing (`collectNudge` reverts
+    ///      `NudgeStreamer__ZeroAmount()` on zero): a split that floors to zero must not brick.
+    function test_dispatch_donationRoundingToZeroDoesNotRevert() public {
+        _enableDonation(50);
+        deal(USDC, address(dispatcher), 1);
+
+        vm.prank(minter);
+        dispatcher.dispatch(minter, 1, "");
+
+        assertEq(IERC20(USDC).balanceOf(address(streamer)), 0, "nothing donated");
+        assertEq(IERC20(USDC).balanceOf(address(dispatcher)), 1, "the whole 1 wei retained");
+    }
+
+    function test_dispatch_emitsNudgeCollectedWithDispatcherAsDonor() public {
+        _enableDonation(50);
+        uint256 amount = 1000e6;
+        deal(USDC, address(dispatcher), amount);
+
+        uint256 donation = amount / 2;
+        uint256 expectedRate = (donation * 1e18) / STREAM_DURATION;
+        vm.expectEmit(true, true, true, true, address(streamer));
+        emit NudgeStreamer.NudgeCollected(batchMinterAddr, USDC, address(dispatcher), donation, expectedRate);
+
+        vm.prank(minter);
+        dispatcher.dispatch(minter, amount, "");
+    }
+
+    /// @dev End to end against the REAL stack: the donation streams linearly and
+    ///      `batchMint` (step 3.5) flushes the accrued portion into the batch-minter's pot.
+    function test_dispatch_donationStreamsAndBatchMintFlushesIt() public {
+        _enableDonation(50);
+        uint256 amount = 1000e6;
+        deal(USDC, address(dispatcher), amount);
+
+        vm.prank(minter);
+        dispatcher.dispatch(minter, amount, "");
+
+        uint256 donation = amount / 2;
+        vm.warp(block.timestamp + STREAM_DURATION / 2);
+        assertApproxEqAbs(streamer.pendingStream(batchMinterAddr, USDC), donation / 2, 1, "half accrued");
+
+        // A qualifying batchMint flushes the stream into the pot and pays it to `recipient`.
+        address batcher = address(0xBA7C);
+        address nftRecipient = address(0xFACE);
+        uint256 payment = NUDGE_SIZE * 1e18;
+        MockPromoToken(payTokenAddr).mint(batcher, payment);
+        vm.startPrank(batcher);
+        IERC20(payTokenAddr).approve(address(batch), payment);
+        uint256[] memory mins = new uint256[](1);
+        batch.batchMint(NUDGE_SIZE, nftRecipient, payment, mins);
+        vm.stopPrank();
+
+        assertApproxEqAbs(
+            IERC20(USDC).balanceOf(nftRecipient), donation / 2, 1, "flushed stream paid out as the nudge"
+        );
+        assertEq(streamer.pendingStream(batchMinterAddr, USDC), 0, "accrued portion consumed by the flush");
+        assertApproxEqAbs(
+            IERC20(USDC).balanceOf(address(streamer)), donation - donation / 2, 1, "remainder still buffered"
+        );
     }
 
     function test_dispatch_revertsWhenCalledByNonMinter() public {

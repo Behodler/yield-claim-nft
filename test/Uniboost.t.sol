@@ -5,6 +5,8 @@ import {Test} from "forge-std/Test.sol";
 import {Uniboost} from "../src/dispatchers/Uniboost.sol";
 import {IDispatchHook} from "../src/interfaces/IDispatchHook.sol";
 import {MockDispatchHook} from "./mocks/MockDispatchHook.sol";
+import {MockNudgeBatchMinter} from "./mocks/MockNudgeBatchMinter.sol";
+import {NudgeStreamer} from "phoenix-nft-staking/NudgeStreamer.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -143,8 +145,15 @@ contract UniboostTest is Test {
     address public owner = address(this);
     address public minter = address(0xBEEF);
     address public nonOwner = address(0xCAFE);
-    address public recipientAddr = address(0xD011);
+    address public recipientAddr;
     address public authorizedPooler = address(0xD00D);
+
+    /// @dev Story 046: donations are pulled into the NudgeStreamer, so the sink must be a
+    ///      contract exposing `isNudgeToken` (an EOA cannot be registered on the streamer).
+    NudgeStreamer public streamer;
+    MockNudgeBatchMinter public recipientMock;
+
+    uint256 internal constant STREAM_DURATION = 1000;
 
     function setUp() public {
         prime = new MockERC20("USD Coin", "USDC", 6);
@@ -155,9 +164,19 @@ contract UniboostTest is Test {
         router = new MockUniV2Router();
         router.setLpToken(pool);
 
+        // Ops order: whitelist the token on the batch-minter, register the stream, then
+        // point the dispatcher at the streamer.
+        recipientMock = new MockNudgeBatchMinter();
+        recipientMock.setNudgeToken(address(prime), true);
+        recipientAddr = address(recipientMock);
+
+        streamer = new NudgeStreamer(owner);
+        streamer.registerStream(recipientAddr, address(prime), STREAM_DURATION);
+
         uniboost = new Uniboost(address(prime), address(router), address(pool), address(target), owner);
         uniboost.setMinter(minter);
         uniboost.setAuthorizedPooler(authorizedPooler, true);
+        uniboost.setNudgeStreamer(address(streamer));
     }
 
     // =========================================================================
@@ -320,8 +339,14 @@ contract UniboostTest is Test {
         vm.prank(minter);
         uniboost.dispatch(minter, amount, "");
 
-        assertEq(prime.balanceOf(recipientAddr), 5e6, "50% forwarded to recipient");
+        // Story 046: the donation is pulled into the streamer's buffer for `recipient`, not
+        // pushed to it. No time has elapsed, so nothing has streamed out yet.
+        assertEq(prime.balanceOf(address(streamer)), 5e6, "50% routed into the streamer");
+        assertEq(prime.balanceOf(recipientAddr), 0, "recipient receives it only as it streams");
+        (, uint256 buffer,,) = streamer.streams(recipientAddr, address(prime));
+        assertEq(buffer, 5e6, "stream buffer equals the donation");
         assertEq(prime.balanceOf(address(uniboost)), 5e6, "remainder retained on contract");
+        assertEq(prime.allowance(address(uniboost), address(streamer)), 0, "no residual allowance lingers");
     }
 
     function test_dispatch_donationDisabled_recipientZero_retainsFull() public {
@@ -333,6 +358,7 @@ contract UniboostTest is Test {
         uniboost.dispatch(minter, amount, "");
 
         assertEq(prime.balanceOf(recipientAddr), 0, "no donation when recipient is zero");
+        assertEq(prime.balanceOf(address(streamer)), 0, "streamer untouched when donation disabled");
         assertEq(prime.balanceOf(address(uniboost)), amount, "full amount retained");
     }
 
@@ -345,7 +371,123 @@ contract UniboostTest is Test {
         uniboost.dispatch(minter, amount, "");
 
         assertEq(prime.balanceOf(recipientAddr), 0, "no donation at split 0");
+        assertEq(prime.balanceOf(address(streamer)), 0, "streamer untouched when donation disabled");
         assertEq(prime.balanceOf(address(uniboost)), amount, "full amount retained");
+    }
+
+    // =========================================================================
+    // setNudgeStreamer / streamed donation (story 046)
+    // =========================================================================
+
+    function test_setNudgeStreamer_storesAndEmits() public {
+        address newStreamer = address(0xB0B);
+        vm.expectEmit(true, true, false, true);
+        emit Uniboost.NudgeStreamerUpdated(address(streamer), newStreamer);
+        uniboost.setNudgeStreamer(newStreamer);
+        assertEq(uniboost.nudgeStreamer(), newStreamer);
+    }
+
+    function test_setNudgeStreamer_revertsWithZeroAddress() public {
+        vm.expectRevert("Uniboost: zero nudgeStreamer");
+        uniboost.setNudgeStreamer(address(0));
+    }
+
+    function test_setNudgeStreamer_revertsForNonOwner() public {
+        vm.prank(nonOwner);
+        vm.expectRevert(abi.encodeWithSignature("OwnableUnauthorizedAccount(address)", nonOwner));
+        uniboost.setNudgeStreamer(address(0xB0B));
+    }
+
+    /// @dev The streamer requirement is scoped to the live-donation branch, so a fresh
+    ///      Uniboost with the donation enabled and no streamer set must revert.
+    function test_dispatch_revertsWhenDonationEnabledAndStreamerUnset() public {
+        Uniboost fresh = new Uniboost(address(prime), address(router), address(pool), address(target), owner);
+        fresh.setMinter(minter);
+        fresh.setRecipient(recipientAddr);
+        fresh.setDonationSplit(50);
+        assertEq(fresh.nudgeStreamer(), address(0), "streamer starts unset");
+
+        uint256 amount = 10e6;
+        prime.mint(address(fresh), amount);
+
+        vm.prank(minter);
+        vm.expectRevert("Uniboost: nudgeStreamer unset");
+        fresh.dispatch(minter, amount, "");
+    }
+
+    /// @dev ...but a donation-DISABLED Uniboost stays fully dispatchable with no streamer.
+    function test_dispatch_donationDisabled_succeedsWithNoStreamerSet() public {
+        Uniboost fresh = new Uniboost(address(prime), address(router), address(pool), address(target), owner);
+        fresh.setMinter(minter);
+        assertEq(fresh.nudgeStreamer(), address(0), "streamer starts unset");
+
+        uint256 amount = 10e6;
+        prime.mint(address(fresh), amount);
+
+        vm.prank(minter);
+        fresh.dispatch(minter, amount, "");
+
+        assertEq(prime.balanceOf(address(fresh)), amount, "full amount retained, no revert");
+    }
+
+    /// @dev Documented ops failure mode: streamer wired but `registerStream` forgotten.
+    function test_dispatch_revertsWhenStreamNotRegistered() public {
+        NudgeStreamer unregistered = new NudgeStreamer(owner);
+        uniboost.setNudgeStreamer(address(unregistered));
+        _enableDonation(50);
+
+        uint256 amount = 10e6;
+        prime.mint(address(uniboost), amount);
+
+        vm.prank(minter);
+        vm.expectRevert(NudgeStreamer.NudgeStreamer__NotRegistered.selector);
+        uniboost.dispatch(minter, amount, "");
+    }
+
+    /// @dev The `donationAmount > 0` guard is load-bearing: `collectNudge` reverts
+    ///      `NudgeStreamer__ZeroAmount()` on zero. A split that floors to zero (here 1 wei
+    ///      of prime at a 50% split) must not brick dispatch.
+    function test_dispatch_donationRoundingToZeroDoesNotRevert() public {
+        _enableDonation(50);
+        prime.mint(address(uniboost), 1);
+
+        vm.prank(minter);
+        uniboost.dispatch(minter, 1, "");
+
+        assertEq(prime.balanceOf(address(streamer)), 0, "nothing donated");
+        assertEq(prime.balanceOf(address(uniboost)), 1, "the whole 1 wei is retained");
+    }
+
+    function test_dispatch_emitsNudgeCollectedWithUniboostAsDonor() public {
+        _enableDonation(50);
+        uint256 amount = 10e6;
+        prime.mint(address(uniboost), amount);
+
+        uint256 donation = amount / 2;
+        uint256 expectedRate = (donation * 1e18) / STREAM_DURATION;
+        vm.expectEmit(true, true, true, true, address(streamer));
+        emit NudgeStreamer.NudgeCollected(recipientAddr, address(prime), address(uniboost), donation, expectedRate);
+
+        vm.prank(minter);
+        uniboost.dispatch(minter, amount, "");
+    }
+
+    function test_dispatch_donationStreamsLinearlyToRecipient() public {
+        _enableDonation(50);
+        uint256 amount = 10e6;
+        prime.mint(address(uniboost), amount);
+
+        vm.prank(minter);
+        uniboost.dispatch(minter, amount, "");
+
+        uint256 donation = amount / 2;
+        vm.warp(block.timestamp + STREAM_DURATION / 2);
+        assertApproxEqAbs(
+            streamer.pendingStream(recipientAddr, address(prime)), donation / 2, 1, "half the donation accrued"
+        );
+
+        recipientMock.flush(address(streamer), address(prime));
+        assertApproxEqAbs(prime.balanceOf(recipientAddr), donation / 2, 1, "flush delivers the accrued half");
     }
 
     function test_dispatch_revertsWhenCalledByNonMinter() public {

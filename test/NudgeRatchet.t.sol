@@ -10,6 +10,8 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {MockDispatchHook} from "./mocks/MockDispatchHook.sol";
 import {MockMintable} from "./mocks/MockMintable.sol";
+import {MockNudgeBatchMinter} from "./mocks/MockNudgeBatchMinter.sol";
+import {NudgeStreamer} from "phoenix-nft-staking/NudgeStreamer.sol";
 
 /// @dev USDC-like 6-decimal mock ERC20 for NudgeRatchet tests.
 contract MockUSDC is ERC20 {
@@ -39,12 +41,31 @@ contract NudgeRatchetTest is Test {
     NudgeRatchetMintDebtHook public mintDebtHook;
     MockMintable public phUSD;
 
+    /// @dev Story 046: donations no longer land on the sink directly — they are pulled into
+    ///      the `NudgeStreamer` and released linearly to `batchMinter`. The sink must
+    ///      therefore be a contract exposing `isNudgeToken` (an EOA cannot be registered).
+    NudgeStreamer public streamer;
+    MockNudgeBatchMinter public batchMinterMock;
+
+    uint256 internal constant STREAM_DURATION = 1000;
+
     address public owner = address(this);
     address public minter = address(0xABCDEF);
-    address public batchMinterAddr = address(0xCAFE);
+    address public batchMinterAddr;
 
     function setUp() public {
         usdc = new MockUSDC();
+
+        // Ops order: whitelist the token on the batch-minter FIRST, then register the
+        // stream, then point the dispatcher at the streamer. Reversing the first two
+        // reverts NudgeStreamer__NotWhitelisted.
+        batchMinterMock = new MockNudgeBatchMinter();
+        batchMinterMock.setNudgeToken(address(usdc), true);
+        batchMinterAddr = address(batchMinterMock);
+
+        streamer = new NudgeStreamer(owner);
+        streamer.registerStream(batchMinterAddr, address(usdc), STREAM_DURATION);
+
         ratchet = new NudgeRatchet(address(usdc), batchMinterAddr, owner);
 
         // Audit M-04: NudgeRatchet asserts its hook is a real NudgeRatchetMintDebtHook
@@ -54,6 +75,17 @@ contract NudgeRatchetTest is Test {
         ratchet.setHook(IDispatchHook(address(mintDebtHook)));
 
         ratchet.setMinter(minter);
+        ratchet.setNudgeStreamer(address(streamer));
+    }
+
+    /// @dev Deploys a second, fully wired ratchet so tests can prove two independent donors
+    ///      accumulate into the same `(batchMinter, token)` stream.
+    function _freshWiredRatchet() internal returns (NudgeRatchet fresh) {
+        fresh = new NudgeRatchet(address(usdc), batchMinterAddr, owner);
+        NudgeRatchetMintDebtHook freshHook = new NudgeRatchetMintDebtHook(owner, address(fresh), address(phUSD));
+        fresh.setHook(IDispatchHook(address(freshHook)));
+        fresh.setMinter(minter);
+        fresh.setNudgeStreamer(address(streamer));
     }
 
     // =========================================================================
@@ -79,8 +111,14 @@ contract NudgeRatchetTest is Test {
         vm.prank(minter);
         ratchet.dispatch(minter, amount, "");
 
-        assertEq(usdc.balanceOf(batchMinterAddr), amount, "batchMinter should have received the tokens");
+        // Story 046: the donation is pulled into the streamer's buffer, not pushed to the
+        // sink. No time has elapsed, so nothing has streamed out to the batchMinter yet.
+        assertEq(usdc.balanceOf(address(streamer)), amount, "streamer should hold the donation");
+        assertEq(usdc.balanceOf(batchMinterAddr), 0, "batchMinter receives the donation only as it streams");
+        (, uint256 buffer,,) = streamer.streams(batchMinterAddr, address(usdc));
+        assertEq(buffer, amount, "stream buffer should equal the donation");
         assertEq(usdc.balanceOf(address(ratchet)), 0, "ratchet should have 0 balance after forwarding");
+        assertEq(usdc.allowance(address(ratchet), address(streamer)), 0, "no residual allowance lingers");
         // Audit M-04: with a real hook installed, phUSD mint-debt accrues (100% default ratio,
         // scaled 6->18 dp). This is the path that silently accrued no debt before the guard.
         assertEq(mintDebtHook.mintDebt(), amount * 1e12, "phUSD mint-debt should accrue at default ratio");
@@ -100,9 +138,9 @@ contract NudgeRatchetTest is Test {
         ratchet.dispatch(minter, amount, "");
 
         assertEq(
-            usdc.balanceOf(batchMinterAddr),
+            usdc.balanceOf(address(streamer)),
             amount + stray,
-            "batchMinter should receive the FULL swept balance, not just amount"
+            "streamer should receive the FULL swept balance, not just amount"
         );
         assertEq(usdc.balanceOf(address(ratchet)), 0, "ratchet should be swept to 0 balance");
         // Debt accrues against `amount` only (scaled 6->18 dp), NOT the swept balance.
@@ -136,7 +174,7 @@ contract NudgeRatchetTest is Test {
         vm.prank(minter);
         ratchet.dispatch(minter, amount, "");
 
-        assertEq(usdc.balanceOf(batchMinterAddr), amount, "USDC forwarded to batchMinter");
+        assertEq(usdc.balanceOf(address(streamer)), amount, "USDC routed to the streamer for the batchMinter");
         assertEq(mintDebtHook.mintDebt(), amount * 1e12, "mint-debt accrued through the real hook");
         // Sanity: the literals must match for the dispatch above to have succeeded.
         assertEq(
@@ -241,6 +279,139 @@ contract NudgeRatchetTest is Test {
     }
 
     // =========================================================================
+    // setNudgeStreamer tests (story 046)
+    // =========================================================================
+
+    function test_setNudgeStreamer_updatesAddress() public {
+        address newStreamer = address(0xB0B);
+        ratchet.setNudgeStreamer(newStreamer);
+        assertEq(ratchet.nudgeStreamer(), newStreamer, "nudgeStreamer should be updated");
+    }
+
+    function test_setNudgeStreamer_emitsNudgeStreamerUpdatedEvent() public {
+        address newStreamer = address(0xB0B);
+        vm.expectEmit(true, true, false, true);
+        emit NudgeRatchet.NudgeStreamerUpdated(address(streamer), newStreamer);
+        ratchet.setNudgeStreamer(newStreamer);
+    }
+
+    function test_setNudgeStreamer_revertsWhenCalledByNonOwner() public {
+        vm.prank(address(0xDEAD));
+        vm.expectRevert();
+        ratchet.setNudgeStreamer(address(0xB0B));
+    }
+
+    function test_setNudgeStreamer_revertsWithZeroAddress() public {
+        vm.expectRevert("NudgeRatchet: zero nudgeStreamer");
+        ratchet.setNudgeStreamer(address(0));
+    }
+
+    /// @dev The streamer is unconditionally mandatory on this contract (no donation-disable
+    ///      switch), so a freshly deployed ratchet with a balance cannot dispatch until an
+    ///      owner wires the streamer.
+    function test_dispatch_revertsWhenStreamerUnset() public {
+        NudgeRatchet fresh = new NudgeRatchet(address(usdc), batchMinterAddr, owner);
+        NudgeRatchetMintDebtHook freshHook = new NudgeRatchetMintDebtHook(owner, address(fresh), address(phUSD));
+        fresh.setHook(IDispatchHook(address(freshHook)));
+        fresh.setMinter(minter);
+        assertEq(fresh.nudgeStreamer(), address(0), "streamer starts unset");
+
+        uint256 amount = 100e6;
+        usdc.mint(address(fresh), amount);
+
+        vm.prank(minter);
+        vm.expectRevert("NudgeRatchet: nudgeStreamer unset");
+        fresh.dispatch(minter, amount, "");
+    }
+
+    /// @dev Documented ops failure mode: streamer wired but `registerStream` forgotten.
+    function test_dispatch_revertsWhenStreamNotRegistered() public {
+        NudgeStreamer unregistered = new NudgeStreamer(owner);
+        ratchet.setNudgeStreamer(address(unregistered));
+
+        uint256 amount = 100e6;
+        usdc.mint(address(ratchet), amount);
+
+        vm.prank(minter);
+        vm.expectRevert(NudgeStreamer.NudgeStreamer__NotRegistered.selector);
+        ratchet.dispatch(minter, amount, "");
+    }
+
+    /// @dev The `bal > 0` guard is load-bearing: `collectNudge` reverts
+    ///      `NudgeStreamer__ZeroAmount()` on zero, so a zero-balance dispatch must skip it
+    ///      entirely rather than bricking.
+    function test_dispatch_zeroBalanceDoesNotRevert() public {
+        assertEq(usdc.balanceOf(address(ratchet)), 0, "ratchet starts empty");
+
+        vm.prank(minter);
+        ratchet.dispatch(minter, 0, "");
+
+        assertEq(usdc.balanceOf(address(streamer)), 0, "nothing donated");
+        assertEq(mintDebtHook.mintDebt(), 0, "no debt accrued for a zero dispatch");
+    }
+
+    /// @dev A zero-balance dispatch must also survive with NO streamer configured — the
+    ///      guard short-circuits before the require.
+    function test_dispatch_zeroBalanceDoesNotRequireStreamer() public {
+        NudgeRatchet fresh = new NudgeRatchet(address(usdc), batchMinterAddr, owner);
+        NudgeRatchetMintDebtHook freshHook = new NudgeRatchetMintDebtHook(owner, address(fresh), address(phUSD));
+        fresh.setHook(IDispatchHook(address(freshHook)));
+        fresh.setMinter(minter);
+
+        vm.prank(minter);
+        fresh.dispatch(minter, 0, "");
+    }
+
+    function test_dispatch_emitsNudgeCollectedWithRatchetAsDonor() public {
+        uint256 amount = 100e6;
+        usdc.mint(address(ratchet), amount);
+
+        // rewardPerSecond = buffer * PRECISION / duration.
+        uint256 expectedRate = (amount * 1e18) / STREAM_DURATION;
+        vm.expectEmit(true, true, true, true, address(streamer));
+        emit NudgeStreamer.NudgeCollected(batchMinterAddr, address(usdc), address(ratchet), amount, expectedRate);
+
+        vm.prank(minter);
+        ratchet.dispatch(minter, amount, "");
+    }
+
+    /// @dev Half the window elapses -> half the donation is claimable by the batchMinter.
+    ///      Integer division floors, so assert with a tolerance in the protocol's favour.
+    function test_dispatch_donationStreamsLinearlyToBatchMinter() public {
+        uint256 amount = 100e6;
+        usdc.mint(address(ratchet), amount);
+        vm.prank(minter);
+        ratchet.dispatch(minter, amount, "");
+
+        vm.warp(block.timestamp + STREAM_DURATION / 2);
+        uint256 pending = streamer.pendingStream(batchMinterAddr, address(usdc));
+        assertApproxEqAbs(pending, amount / 2, 1, "half the donation accrued");
+
+        batchMinterMock.flush(address(streamer), address(usdc));
+        assertApproxEqAbs(usdc.balanceOf(batchMinterAddr), amount / 2, 1, "flush delivers the accrued half");
+    }
+
+    /// @dev Two independent NudgeRatchet donors accumulate into one (batchMinter, token)
+    ///      stream; the rate is recomputed over the FULL window on each deposit.
+    function test_twoDonors_accumulateBufferAndRecomputeRate() public {
+        uint256 first = 100e6;
+        usdc.mint(address(ratchet), first);
+        vm.prank(minter);
+        ratchet.dispatch(minter, first, "");
+
+        NudgeRatchet second = _freshWiredRatchet();
+        uint256 secondAmount = 50e6;
+        usdc.mint(address(second), secondAmount);
+        vm.prank(minter);
+        second.dispatch(minter, secondAmount, "");
+
+        (, uint256 buffer, uint256 rewardPerSecond,) = streamer.streams(batchMinterAddr, address(usdc));
+        assertEq(buffer, first + secondAmount, "buffer accumulates across donors");
+        assertEq(rewardPerSecond, ((first + secondAmount) * 1e18) / STREAM_DURATION, "rate recomputed on deposit");
+        assertEq(usdc.balanceOf(address(streamer)), first + secondAmount, "streamer custodies both donations");
+    }
+
+    // =========================================================================
     // constructor tests
     // =========================================================================
 
@@ -282,7 +453,7 @@ contract NudgeRatchetTest is Test {
 
         assertTrue(success, "Mint should succeed");
         assertEq(usdc.balanceOf(user), 90e6, "User should have paid 10e6");
-        assertEq(usdc.balanceOf(batchMinterAddr), 10e6, "batchMinter should have received the tokens");
+        assertEq(usdc.balanceOf(address(streamer)), 10e6, "streamer should have received the tokens");
         assertEq(usdc.balanceOf(address(nftMinter)), 0, "NFTMinterV2 should have 0 balance");
         assertEq(usdc.balanceOf(address(ratchet)), 0, "NudgeRatchet should have 0 balance");
         assertEq(nftMinter.balanceOf(nftRecipient, 1), 1, "NFT recipient should have 1 claim NFT");
