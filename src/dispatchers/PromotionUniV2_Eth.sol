@@ -13,6 +13,7 @@ import {IUnlockCallback} from "../interfaces/balancer/IUnlockCallback.sol";
 import {VaultSwapParams, SwapKind} from "../interfaces/balancer/BalancerTypes.sol";
 import {IUniswapV2Router02} from "../interfaces/uniswap/IUniswapV2Router02.sol";
 import {IUniswapV2Pair} from "../interfaces/uniswap/IUniswapV2Pair.sol";
+import {INudgeStreamer} from "phoenix-nft-staking/INudgeStreamer.sol";
 
 /// @title PromotionUniV2_Eth
 /// @notice A reusable, per-partner V2 token dispatcher that boosts a phUSD/promotion Uniswap V2
@@ -23,7 +24,37 @@ import {IUniswapV2Pair} from "../interfaces/uniswap/IUniswapV2Pair.sol";
 ///      and the SKY PSM fee/decimal scaffolding — here inverted from `buyGem` to `sellGem`).
 ///
 ///      The prime token is USDC. On `dispatch`, a configurable donation split of the USDC is
-///      forwarded to `batchMinter` and the rest is retained. On `pool` (authorized-pooler gated),
+///      routed to `batchMinter` through the `NudgeStreamer` and the rest is retained.
+///
+///      ### The streamer is mandatory ON THE LIVE-DONATION BRANCH ONLY (story 046)
+///
+///      The legacy direct `safeTransfer(batchMinter, donationAmount)` has been REMOVED, not kept
+///      as a fallback. The requirement is scoped to the branch that would actually pay, so a
+///      donation-disabled deployment (`batchMinter == address(0)` or `donationSplit == 0`) stays
+///      fully deployable and dispatchable with no streamer set. Once the donation IS live:
+///
+///        * `nudgeStreamer == address(0)` (its post-deploy state — it is a setter-only field,
+///          deliberately not a constructor arg because the streamer is deployed later) makes
+///          `dispatch` revert `"PromotionUniV2_Eth: nudgeStreamer unset"`.
+///        * If the streamer is set but ops forgot `registerStream(batchMinter, USDC, duration)`
+///          on it, every `dispatch` reverts `NudgeStreamer__NotRegistered()`. That is the accepted
+///          consequence of the mandatory-streamer decision, NOT an audit finding. Repointing
+///          `batchMinter` re-arms the same failure mode; register the new pair first.
+///
+///      **Required ops ordering** (reversing the first two reverts
+///      `NudgeStreamer__NotWhitelisted`):
+///        1. `batchMinter.setNudgeTokenWhitelist(USDC, true)`
+///        2. `nudgeStreamer.registerStream(batchMinter, USDC, duration)`
+///        3. `this.setNudgeStreamer(nudgeStreamer)`
+///
+///      **Gas / behaviour:** the donation is no longer a leaf `transfer`. `collectNudge` first
+///      settles the accrued stream (an outbound transfer to `batchMinter`) and then pulls via
+///      `transferFrom`, all inside this dispatch transaction, so dispatch is measurably more
+///      expensive and now depends on external streamer state. `collectNudge` also reverts
+///      `NudgeStreamer__ZeroAmount()` on a zero amount, which is why the `donationAmount > 0`
+///      guard is load-bearing rather than cosmetic.
+///
+///      On `pool` (authorized-pooler gated),
 ///      the retained USDC is split 60/30/10:
 ///        - Leg A (60%) → phUSD: USDC →(SKY PSM `sellGem`)→ USDS →(ERC4626 `deposit`)→ sUSDS
 ///          →(Balancer V3 swap)→ phUSD. HALF the acquired phUSD is burned (permanent supply cut);
@@ -119,6 +150,11 @@ contract PromotionUniV2_Eth is ATokenDispatcherV2, IUnlockCallback {
     ///         dispatch. Defaults to 0 (donation disabled).
     uint256 public donationSplit;
 
+    /// @notice The NudgeStreamer that buffers and linearly releases nudge donations to
+    ///         `batchMinter`. Setter-only (starts `address(0)`); mandatory only when the donation
+    ///         branch is live — see the contract-level dev notes.
+    address public nudgeStreamer;
+
     // ---------------------------------------------------------------------
     // Pooler-auth set (copied verbatim from Uniboost)
     // ---------------------------------------------------------------------
@@ -147,6 +183,7 @@ contract PromotionUniV2_Eth is ATokenDispatcherV2, IUnlockCallback {
     event PoolSet(address indexed pair);
     event DonationSplitSet(uint256 newSplit);
     event BatchMinterSet(address newBatchMinter);
+    event NudgeStreamerUpdated(address indexed oldStreamer, address indexed newStreamer);
     event PSMSet(address newPSM);
     event MaxTinSet(uint256 newMaxTin);
     event EthToPromotionPathSet(address[] path);
@@ -306,6 +343,15 @@ contract PromotionUniV2_Eth is ATokenDispatcherV2, IUnlockCallback {
         emit BatchMinterSet(newBatchMinter);
     }
 
+    /// @notice Updates the NudgeStreamer donations are routed through. Only callable by owner.
+    /// @param newStreamer The new streamer address. Must be non-zero.
+    function setNudgeStreamer(address newStreamer) external onlyOwner {
+        require(newStreamer != address(0), "PromotionUniV2_Eth: zero nudgeStreamer");
+        address old = nudgeStreamer;
+        nudgeStreamer = newStreamer;
+        emit NudgeStreamerUpdated(old, newStreamer);
+    }
+
     /// @notice Sets or revokes an authorized pooler. Only callable by owner.
     function setAuthorizedPooler(address pooler, bool authorized) external onlyOwner {
         require(pooler != address(0), "PromotionUniV2_Eth: zero pooler");
@@ -328,16 +374,26 @@ contract PromotionUniV2_Eth is ATokenDispatcherV2, IUnlockCallback {
     // Dispatch
     // ---------------------------------------------------------------------
 
-    /// @notice Dispatches prime USDC (already on this contract): forwards `donationSplit%` to
+    /// @notice Dispatches prime USDC (already on this contract): streams `donationSplit%` to
     ///         `batchMinter` when the donation is enabled, retaining the rest for the next `pool()`.
     /// @dev The base then calls `hook.onDispatch(minter, amount)` with the GROSS amount, so
     ///      mint-debt accrues on the full dispatched USDC regardless of the donation (same
-    ///      convention as `Uniboost` / `BalancerPoolerV2`). MUST NOT re-declare base modifiers.
+    ///      convention as `Uniboost` / `BalancerPoolerV2`). Only the live-donation branch requires
+    ///      a configured `nudgeStreamer`. MUST NOT re-declare base modifiers.
     function _dispatch(address, uint256 amount, bytes calldata /* extraData */ ) internal override {
         bool donationEnabled = batchMinter != address(0) && donationSplit > 0;
         uint256 donationAmount = donationEnabled ? (amount * donationSplit) / 100 : 0;
+        // The `> 0` guard is load-bearing: `collectNudge` reverts `NudgeStreamer__ZeroAmount()`
+        // on zero, which would brick dispatch. It also scopes the mandatory-streamer requirement
+        // to the live-donation branch, so a donation-disabled deployment dispatches with no
+        // streamer set. `forceApprove` with the exact amount (USDC rejects a plain `approve` over
+        // a non-zero residual allowance); `collectNudge` consumes the whole allowance in this
+        // same transaction, so nothing lingers.
         if (donationAmount > 0) {
-            IERC20(USDC).safeTransfer(batchMinter, donationAmount);
+            address streamer = nudgeStreamer;
+            require(streamer != address(0), "PromotionUniV2_Eth: nudgeStreamer unset");
+            IERC20(USDC).forceApprove(streamer, donationAmount);
+            INudgeStreamer(streamer).collectNudge(batchMinter, USDC, donationAmount);
         }
         // The remainder simply stays on the contract as the prime balance the next pool() consumes.
     }

@@ -7,6 +7,7 @@ import {ATokenDispatcherV2} from "./ATokenDispatcherV2.sol";
 import {ITokenDispatcherV2} from "../interfaces/ITokenDispatcherV2.sol";
 import {IUniswapV2Router02} from "../interfaces/uniswap/IUniswapV2Router02.sol";
 import {IUniswapV2Pair} from "../interfaces/uniswap/IUniswapV2Pair.sol";
+import {INudgeStreamer} from "phoenix-nft-staking/INudgeStreamer.sol";
 
 /// @title Uniboost
 /// @notice A V2 token dispatcher that boosts the price and liquidity of a target Uniswap V2
@@ -15,7 +16,36 @@ import {IUniswapV2Pair} from "../interfaces/uniswap/IUniswapV2Pair.sol";
 ///      `transferFrom`; owner-settable recipient) and `BalancerPoolerV2` (two-phase split:
 ///      `_dispatch` carves the donation and retains the rest; a separate authorized-pooler-gated
 ///      `pool(...)` later performs the boost). Unlike `BalancerPoolerV2`, the prime token here
-///      IS the donation token, so the donation is a plain `safeTransfer` — no PSM, no swap.
+///      IS the donation token, so the donation needs no PSM and no swap — it is simply approved
+///      to the `NudgeStreamer` and pulled by `collectNudge`.
+///
+///      ### The streamer is mandatory ON THE LIVE-DONATION BRANCH ONLY (story 046)
+///
+///      The legacy direct `safeTransfer(recipient, donationAmount)` has been REMOVED, not kept as
+///      a fallback. The requirement is scoped to the branch that would actually pay, so a
+///      donation-disabled Uniboost (`recipient == address(0)` or `donationSplit == 0`) stays
+///      fully deployable and dispatchable with no streamer set. Once the donation IS live:
+///
+///        * `nudgeStreamer == address(0)` (its post-deploy state — it is a setter-only field,
+///          deliberately not a constructor arg because the streamer is deployed later) makes
+///          `dispatch` revert `"Uniboost: nudgeStreamer unset"`.
+///        * If the streamer is set but ops forgot `registerStream(recipient, primeToken, duration)`
+///          on it, every `dispatch` reverts `NudgeStreamer__NotRegistered()`. That is the accepted
+///          consequence of the mandatory-streamer decision, NOT an audit finding. Repointing
+///          `recipient` re-arms the same failure mode; register the new pair first.
+///
+///      **Required ops ordering** (reversing the first two reverts
+///      `NudgeStreamer__NotWhitelisted`):
+///        1. `recipient.setNudgeTokenWhitelist(primeToken, true)`
+///        2. `nudgeStreamer.registerStream(recipient, primeToken, duration)`
+///        3. `this.setNudgeStreamer(nudgeStreamer)`
+///
+///      **Gas / behaviour:** the donation is no longer a leaf `transfer`. `collectNudge` first
+///      settles the accrued stream (an outbound transfer to `recipient`) and then pulls via
+///      `transferFrom`, all inside this dispatch transaction, so dispatch is measurably more
+///      expensive and now depends on external streamer state. `collectNudge` also reverts
+///      `NudgeStreamer__ZeroAmount()` on a zero amount, which is why the `donationAmount > 0`
+///      guard is load-bearing rather than cosmetic.
 ///
 ///      The boost (`pool`) swaps all retained prime into the pool's pairing token, swaps ~half of
 ///      that into the boosted target token, then adds both sides as liquidity to the target pool.
@@ -53,6 +83,11 @@ contract Uniboost is ATokenDispatcherV2 {
     ///         address(0) disables the donation even if donationSplit > 0.
     address public recipient;
 
+    /// @notice The NudgeStreamer that buffers and linearly releases nudge donations to
+    ///         `recipient`. Setter-only (starts `address(0)`); mandatory only when the donation
+    ///         branch is live — see the contract-level dev notes.
+    address public nudgeStreamer;
+
     uint256 public authVersion;
     mapping(address => uint256) public poolerAuthVersion;
 
@@ -64,6 +99,7 @@ contract Uniboost is ATokenDispatcherV2 {
     event PoolSet(address indexed pool, address indexed pairToken);
     event DonationSplitSet(uint256 newSplit);
     event RecipientSet(address newRecipient);
+    event NudgeStreamerUpdated(address indexed oldStreamer, address indexed newStreamer);
     event PrimeToPairPathSet(address[] path);
 
     modifier onlyAuthorizedPooler() {
@@ -149,6 +185,15 @@ contract Uniboost is ATokenDispatcherV2 {
         emit RecipientSet(newRecipient);
     }
 
+    /// @notice Updates the NudgeStreamer donations are routed through. Only callable by owner.
+    /// @param newStreamer The new streamer address. Must be non-zero.
+    function setNudgeStreamer(address newStreamer) external onlyOwner {
+        require(newStreamer != address(0), "Uniboost: zero nudgeStreamer");
+        address old = nudgeStreamer;
+        nudgeStreamer = newStreamer;
+        emit NudgeStreamerUpdated(old, newStreamer);
+    }
+
     /// @notice Sets a custom routing path for the prime -> pair swap performed in `pool()`.
     ///         Must start at `primeToken` and end at the current `_pairToken`. Only callable by
     ///         owner. Passing an empty array reverts; to revert to the direct route, set
@@ -174,9 +219,10 @@ contract Uniboost is ATokenDispatcherV2 {
         return _primeToPairPath;
     }
 
-    /// @notice Dispatches prime tokens (already on this contract): forwards `donationSplit%` to
+    /// @notice Dispatches prime tokens (already on this contract): streams `donationSplit%` to
     ///         `recipient` when the donation is enabled, retaining the rest for the next `pool()`.
-    /// @dev Donation is carved out only when enabled (recipient set, split > 0). The base then
+    /// @dev Donation is carved out only when enabled (recipient set, split > 0), and only that
+    ///      branch requires a configured `nudgeStreamer`. The base then
     ///      calls `hook.onDispatch(minter, amount)` with the gross amount, so mint-debt accrues on
     ///      the full dispatched prime regardless of the donation (same convention as
     ///      `BalancerPoolerV2`). MUST NOT re-declare base modifiers.
@@ -191,8 +237,17 @@ contract Uniboost is ATokenDispatcherV2 {
     {
         bool donationEnabled = recipient != address(0) && donationSplit > 0;
         uint256 donationAmount = donationEnabled ? (amount * donationSplit) / 100 : 0;
+        // The `> 0` guard is load-bearing: `collectNudge` reverts `NudgeStreamer__ZeroAmount()`
+        // on zero, which would brick dispatch. It also scopes the mandatory-streamer requirement
+        // to the live-donation branch, so a donation-disabled Uniboost dispatches with no
+        // streamer set. `forceApprove` with the exact amount (USDC is in play and a plain
+        // `approve` over a non-zero residual can revert); `collectNudge` consumes the whole
+        // allowance in this same transaction, so nothing lingers.
         if (donationAmount > 0) {
-            IERC20(_primeToken).safeTransfer(recipient, donationAmount);
+            address streamer = nudgeStreamer;
+            require(streamer != address(0), "Uniboost: nudgeStreamer unset");
+            IERC20(_primeToken).forceApprove(streamer, donationAmount);
+            INudgeStreamer(streamer).collectNudge(recipient, _primeToken, donationAmount);
         }
         // The remainder simply stays on the contract — it is the prime balance the next pool()
         // will consume. No wrapping, no swap, nothing else.

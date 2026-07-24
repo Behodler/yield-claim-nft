@@ -7,15 +7,47 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ATokenDispatcherV2} from "./ATokenDispatcherV2.sol";
 import {ITokenDispatcherV2} from "../interfaces/ITokenDispatcherV2.sol";
 import {INudgeRatchetMintDebtHook} from "../interfaces/INudgeRatchetMintDebtHook.sol";
+import {INudgeStreamer} from "phoenix-nft-staking/INudgeStreamer.sol";
 
 /// @title NudgeRatchet
-/// @notice A V2 token dispatcher that forwards its USDC token to an owner-settable
-///         `batchMinter` address — the nudge-reward sink. Modeled on `GatherV2`.
+/// @notice A V2 token dispatcher that routes its USDC token to an owner-settable
+///         `batchMinter` address — the nudge-reward sink — through the `NudgeStreamer`.
+///         Modeled on `GatherV2`.
 /// @dev Tokens arrive directly on this contract via the minter's transferFrom; `_dispatch`
-///      only forwards the already-present balance with a single `safeTransfer`. The
-///      `batchMinter` sink only accepts USDC, so the constructor enforces a 6-decimal
-///      deploy-time guard on the token. The base `dispatch` applies the
-///      `nonReentrant`/`onlyMinter`/`whenNotPaused` modifier chain.
+///      hands the already-present balance to the streamer, which buffers it and releases it
+///      linearly to `batchMinter` over the registered stream duration. The `batchMinter` sink
+///      only accepts USDC, so the constructor enforces a 6-decimal deploy-time guard on the
+///      token. The base `dispatch` applies the `nonReentrant`/`onlyMinter`/`whenNotPaused`
+///      modifier chain.
+///
+///      ### The streamer is MANDATORY (story 046)
+///
+///      The legacy direct `safeTransfer(batchMinter, bal)` has been REMOVED, not retained as a
+///      fallback. There is no donation-disable switch on this contract, so once it holds any
+///      balance the streamer path is the only path:
+///
+///        * `nudgeStreamer == address(0)` (its post-deploy state — it is a setter-only field,
+///          deliberately not a constructor arg because the streamer is deployed later) makes
+///          every `dispatch` with a non-zero balance revert
+///          `"NudgeRatchet: nudgeStreamer unset"`.
+///        * If the streamer is set but ops forgot `registerStream(batchMinter, _token, duration)`
+///          on it, every `dispatch` reverts `NudgeStreamer__NotRegistered()`. This is the
+///          accepted consequence of the mandatory-streamer decision, NOT an audit finding.
+///        * Repointing `batchMinter` to an address with no registered stream re-arms the same
+///          failure mode; register the new pair first.
+///
+///      **Required ops ordering** (reversing the first two reverts
+///      `NudgeStreamer__NotWhitelisted`):
+///        1. `batchMinter.setNudgeTokenWhitelist(_token, true)`
+///        2. `nudgeStreamer.registerStream(batchMinter, _token, duration)`
+///        3. `this.setNudgeStreamer(nudgeStreamer)`
+///
+///      **Gas / behaviour:** the donation is no longer a leaf `transfer`. `collectNudge` first
+///      settles the accrued stream (an outbound transfer to `batchMinter`) and then pulls via
+///      `transferFrom`, all inside this dispatch transaction, so dispatch is measurably more
+///      expensive and now depends on external streamer state. `collectNudge` also reverts
+///      `NudgeStreamer__ZeroAmount()` on a zero amount, which is why the `bal > 0` guard below
+///      is load-bearing rather than cosmetic.
 contract NudgeRatchet is ATokenDispatcherV2 {
     using SafeERC20 for IERC20;
 
@@ -25,6 +57,11 @@ contract NudgeRatchet is ATokenDispatcherV2 {
     /// @notice Owner-settable nudge-reward sink that receives forwarded USDC.
     address public batchMinter;
 
+    /// @notice The NudgeStreamer that buffers and linearly releases nudge donations to the
+    ///         batch-minter. Setter-only (starts `address(0)`); mandatory once this contract has
+    ///         a balance to sweep — see the contract-level dev notes.
+    address public nudgeStreamer;
+
     /// @dev Must equal NudgeRatchetMintDebtHook.HOOK_TYPE_ID. Kept as a local
     ///      constant (rather than importing) to avoid a hard dependency cycle;
     ///      both derive from the same literal string and must stay in sync. (Audit M-04)
@@ -32,6 +69,9 @@ contract NudgeRatchet is ATokenDispatcherV2 {
 
     /// @notice Emitted when the batchMinter address is updated.
     event BatchMinterUpdated(address indexed oldBatchMinter, address indexed newBatchMinter);
+
+    /// @notice Emitted when the nudgeStreamer address is updated.
+    event NudgeStreamerUpdated(address indexed oldStreamer, address indexed newStreamer);
 
     /// @param token_ The token this dispatcher acts on — must be 6-decimal USDC.
     /// @param batchMinter_ The initial nudge-reward sink to forward tokens to.
@@ -60,13 +100,24 @@ contract NudgeRatchet is ATokenDispatcherV2 {
         emit BatchMinterUpdated(old, newBatchMinter);
     }
 
-    /// @notice Forwards this contract's USDC to the batchMinter.
+    /// @notice Updates the NudgeStreamer donations are routed through. Only callable by the owner.
+    /// @param newStreamer The new streamer address. Must be non-zero.
+    function setNudgeStreamer(address newStreamer) external onlyOwner {
+        require(newStreamer != address(0), "NudgeRatchet: zero nudgeStreamer");
+        address old = nudgeStreamer;
+        nudgeStreamer = newStreamer;
+        emit NudgeStreamerUpdated(old, newStreamer);
+    }
+
+    /// @notice Routes this contract's USDC to the batchMinter through the NudgeStreamer.
     /// @dev DESIGN: this sweeps the FULL token balance, not the `amount` argument.
     ///      Rationale and known/accepted properties (do not re-flag as findings):
     ///        * Self-cleaning: any USDC sent here out-of-band (mistaken transfers,
     ///          airdrops) is forwarded on the next dispatch, so no rescueERC20
     ///          escape hatch is needed for `_token`. (Non-`_token` assets are out of
     ///          scope and intentionally have no recovery path on this contract.)
+    ///          The sweep now lands in the streamer's buffer rather than on the
+    ///          batchMinter directly; it still reaches the batchMinter, just linearly.
     ///        * Debt/transfer decoupling is INTENTIONAL. The base dispatcher accrues
     ///          mint-debt in the hook against `amount` (see ATokenDispatcherV2.dispatch
     ///          -> hook.onDispatch), while this transfers the actual balance. The two
@@ -96,7 +147,17 @@ contract NudgeRatchet is ATokenDispatcherV2 {
         // Cheap, redundant, and documents the invariant at the point it matters.
         require(bal >= amount, "NudgeRatchet: insufficient balance for dispatch");
 
-        // Sweep the full balance (>= amount). Surplus, if any, is over-backing.
-        IERC20(_token).safeTransfer(batchMinter, bal);
+        // Sweep the full balance (>= amount) into the streamer. Surplus, if any, is
+        // over-backing. The `bal > 0` guard is load-bearing: `collectNudge` reverts
+        // `NudgeStreamer__ZeroAmount()` on a zero amount, which would brick dispatch.
+        // `forceApprove` (not `approve`) with the exact amount because the prime token is
+        // USDC; `collectNudge` consumes the whole allowance in this same transaction, so
+        // nothing lingers and no infinite approval is ever handed out.
+        if (bal > 0) {
+            address streamer = nudgeStreamer;
+            require(streamer != address(0), "NudgeRatchet: nudgeStreamer unset");
+            IERC20(_token).forceApprove(streamer, bal);
+            INudgeStreamer(streamer).collectNudge(batchMinter, _token, bal);
+        }
     }
 }
