@@ -3,8 +3,9 @@ src = "src"
 out = "out"
 libs = ["lib"]
 remappings = [
-    "@openzeppelin/contracts/=lib/immutable/openzeppelin-contracts/contracts/",
-    "pauser/=lib/mutable/pauser/src/"
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "pauser/=lib/pauser/src/",
+    "phoenix-nft-staking/=lib/phoenix-nft-staking/src/"
 ]
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

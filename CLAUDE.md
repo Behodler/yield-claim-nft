@@ -6,69 +6,39 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a Foundry smart contract submodule for the YieldClaimNft contract.
 
-## Dependency Management
+## Dependencies
 
-### Types of Dependencies
+All dependencies live at the root of `lib/` as ordinary git submodules with their full
+source available — there is no interface-only stripping and no change request process.
 
-1. **Immutable Dependencies** (lib/immutable/)
-   - External libraries and contracts that don't change based on sibling requirements
-   - Full source code is available
-   - Examples: OpenZeppelin, standard libraries
+Current dependencies:
 
-2. **Mutable Dependencies** (lib/mutable/)
-   - Dependencies from sibling submodules
-   - ONLY interfaces and abstract contracts are exposed
-   - NO implementation details are available
-   - Changes to these dependencies must go through the change request process
+- `lib/forge-std` - Foundry standard library
+- `lib/openzeppelin-contracts` - OpenZeppelin contracts
+- `lib/pauser` - Behodler pauser (`Behodler/pauser`)
+- `lib/phoenix-nft-staking` - Phoenix NFT staking (`Behodler/phoenix-nft-staking`)
 
-### Important Rules
+Remappings are declared in `foundry.toml`:
 
-- **NEVER** access implementation details of mutable dependencies
-- Mutable dependencies only expose interfaces and abstract contracts
-- If a feature requires changes to a mutable dependency, add it to the change request queue
-- All development must follow Test-Driven Development (TDD) principles using Foundry
+```
+@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/
+pauser/=lib/pauser/src/
+phoenix-nft-staking/=lib/phoenix-nft-staking/src/
+```
 
-### Change Request Process
+Add a new dependency with `forge install <org>/<repo>` (or `git submodule add`) into `lib/`,
+then add a remapping in `foundry.toml`.
 
-When a feature requires changes to a mutable dependency:
-
-1. Add the request to `MutableChangeRequests.json` with format:
-   ```json
-   {
-     "requests": [
-       {
-         "dependency": "dependency-name",
-         "changes": [
-           {
-             "fileName": "ISomeInterface.sol",
-             "description": "Plain language description of what needs to change"
-           }
-         ]
-       }
-     ]
-   }
-   ```
-
-2. **STOP WORK** immediately after adding the change request
-3. Inform the user that dependency changes are needed
-4. Wait for the dependency to be updated before continuing
-
-### Available Commands
-
-Use these as slash commands (e.g., `/add-mutable-dependency`) or run the scripts directly:
-
-- `.claude/scripts/add-mutable-dependency.sh <repo>` - Add a mutable dependency (sibling)
-- `.claude/scripts/add-immutable-dependency.sh <repo>` - Add an immutable dependency
-- `.claude/scripts/update-mutable-dependency.sh <name>` - Update a mutable dependency
-- `.claude/scripts/consider-change-requests.sh` - Review and implement sibling change requests
+Sibling repos are pinned to a specific commit like any other submodule. If a sibling needs a
+change, make it in that repo, then bump the pinned commit here with
+`git submodule update --remote lib/<name>` and commit the new pointer.
 
 ## Project Structure
 
 - `src/` - Solidity source files
 - `test/` - Test files (TDD required)
 - `script/` - Deployment scripts
-- `lib/mutable/` - Mutable dependencies (interfaces only)
-- `lib/immutable/` - Immutable dependencies (full source)
+- `lib/` - Dependencies (git submodules)
 
 ## Development Guidelines
 
@@ -97,7 +67,5 @@ Use these as slash commands (e.g., `/add-mutable-dependency`) or run the scripts
 
 ## Important Reminders
 
-- This submodule operates independently from sibling submodules
 - Follow Solidity best practices and naming conventions
 - Use Foundry testing tools exclusively (no Hardhat or Truffle)
-- If you need to change a mutable dependency, use the change request process
