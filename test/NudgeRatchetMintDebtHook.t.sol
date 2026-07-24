@@ -8,6 +8,8 @@ import {NudgeRatchet} from "../src/dispatchers/NudgeRatchet.sol";
 import {IDispatchHook} from "../src/interfaces/IDispatchHook.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {MockMintable, ReentrantMockMintable, IReentrantPullTarget} from "./mocks/MockMintable.sol";
+import {MockNudgeBatchMinter} from "./mocks/MockNudgeBatchMinter.sol";
+import {NudgeStreamer} from "phoenix-nft-staking/NudgeStreamer.sol";
 
 /// @dev USDC-like 6-decimal mock ERC20 for the wiring test.
 contract MockUSDC6 is ERC20 {
@@ -406,8 +408,15 @@ contract NudgeRatchetMintDebtHookTest is Test {
 
     function test_wiring_dispatchForwardsUSDCAndAccruesDebtAtDefaultRatio() public {
         MockUSDC6 usdc = new MockUSDC6();
-        address batchMinterAddr = address(0xCAFE);
         address dispatcherMinter = address(0xB0BB1E);
+
+        // Story 046: the nudge donation is now pulled by the NudgeStreamer, so the sink must be
+        // a contract exposing `isNudgeToken` and the stream must be registered before dispatch.
+        MockNudgeBatchMinter batchMinterMock = new MockNudgeBatchMinter();
+        batchMinterMock.setNudgeToken(address(usdc), true);
+        address batchMinterAddr = address(batchMinterMock);
+        NudgeStreamer streamer = new NudgeStreamer(owner);
+        streamer.registerStream(batchMinterAddr, address(usdc), 1000);
 
         NudgeRatchet ratchet = new NudgeRatchet(address(usdc), batchMinterAddr, owner);
         NudgeRatchetMintDebtHook hook = new NudgeRatchetMintDebtHook(owner, address(ratchet), address(phUSD));
@@ -415,6 +424,7 @@ contract NudgeRatchetMintDebtHookTest is Test {
         // Wiring per story: setHook then setMinter.
         ratchet.setHook(IDispatchHook(address(hook)));
         ratchet.setMinter(dispatcherMinter);
+        ratchet.setNudgeStreamer(address(streamer));
 
         uint256 amount = 500e6;
         usdc.mint(address(ratchet), amount);
@@ -422,8 +432,8 @@ contract NudgeRatchetMintDebtHookTest is Test {
         vm.prank(dispatcherMinter);
         ratchet.dispatch(dispatcherMinter, amount, "");
 
-        // USDC moved to batchMinter.
-        assertEq(usdc.balanceOf(batchMinterAddr), amount, "USDC should be forwarded to batchMinter");
+        // USDC moved into the streamer, which releases it linearly to batchMinter.
+        assertEq(usdc.balanceOf(address(streamer)), amount, "USDC should be routed into the streamer");
         assertEq(usdc.balanceOf(address(ratchet)), 0, "ratchet should hold no USDC");
 
         // Debt accrued at default ratio 100%, scaled 6->18 dp: 500e6 USDC -> 500e18 phUSD.
