@@ -8,9 +8,6 @@ import {ATokenDispatcherV2} from "./ATokenDispatcherV2.sol";
 import {ITokenDispatcherV2} from "../interfaces/ITokenDispatcherV2.sol";
 import {ISkyPSM} from "../interfaces/ISkyPSM.sol";
 import {IPhusdBurnable} from "../interfaces/IPhusdBurnable.sol";
-import {IBalancerVault} from "../interfaces/balancer/IBalancerVault.sol";
-import {IUnlockCallback} from "../interfaces/balancer/IUnlockCallback.sol";
-import {VaultSwapParams, SwapKind} from "../interfaces/balancer/BalancerTypes.sol";
 import {IUniswapV2Router02} from "../interfaces/uniswap/IUniswapV2Router02.sol";
 import {IUniswapV2Pair} from "../interfaces/uniswap/IUniswapV2Pair.sol";
 import {INudgeStreamer} from "phoenix-nft-staking/INudgeStreamer.sol";
@@ -18,10 +15,10 @@ import {INudgeStreamer} from "phoenix-nft-staking/INudgeStreamer.sol";
 /// @title PromotionUniV2_Eth
 /// @notice A reusable, per-partner V2 token dispatcher that boosts a phUSD/promotion Uniswap V2
 ///         pool via a two-legged "buy-and-pool" zap, plus an optional prime-token donation split.
-/// @dev Structurally a blend of `Uniboost` (donation split, authorized-pooler machinery, UniV2
-///      zap, `setPool`/`_setPool` pair validation, `rescueERC20`) and `BalancerPoolerV2` (the
-///      Balancer V3 `unlock`→`swap`→`settle`→`sendTo` interaction, the USDS→sUSDS ERC4626 wrap,
-///      and the SKY PSM fee/decimal scaffolding — here inverted from `buyGem` to `sellGem`).
+/// @dev Structurally `Uniboost` (donation split, authorized-pooler machinery, UniV2 zap,
+///      `setPool`/`_setPool` pair validation, `rescueERC20`) plus a USDS→sUSDS ERC4626 wrap and
+///      SKY PSM fee/decimal scaffolding (`sellGem`). Leg A's sUSDS→phUSD swap goes through the
+///      phUSD/sUSDS Uniswap V2 pair via Router02 (story 049).
 ///
 ///      The prime token is USDC. On `dispatch`, a configurable donation split of the USDC is
 ///      routed to `batchMinter` through the `NudgeStreamer` and the rest is retained.
@@ -57,8 +54,9 @@ import {INudgeStreamer} from "phoenix-nft-staking/INudgeStreamer.sol";
 ///      On `pool` (authorized-pooler gated),
 ///      the retained USDC is split 60/30/10:
 ///        - Leg A (60%) → phUSD: USDC →(SKY PSM `sellGem`)→ USDS →(ERC4626 `deposit`)→ sUSDS
-///          →(Balancer V3 swap)→ phUSD. HALF the acquired phUSD is burned (permanent supply cut);
-///          the rest is pooled, value-matching the promotion side.
+///          →(UniV2 `swapExactTokensForTokens` on the phUSD/sUSDS pair)→ phUSD. HALF the acquired
+///          phUSD is burned (permanent supply cut); the rest is pooled, value-matching the
+///          promotion side.
 ///        - Leg B (30%) → promotion: USDC →(UniV2 `swapExactTokensForETH`)→ native ETH
 ///          →(UniV2 `swapExactETHForTokens`)→ promotion token.
 ///        - Leg C (10%) → WBTC: USDC →(UniV2 `swapExactTokensForTokens`)→ WBTC, retained on the
@@ -71,7 +69,7 @@ import {INudgeStreamer} from "phoenix-nft-staking/INudgeStreamer.sol";
 ///      its phUSD/promotion pair are per-partner (constructor params). Guards live on this concrete
 ///      dispatcher, never the abstract base. `_dispatch` overrides only the internal extension
 ///      point and MUST NOT re-declare `onlyMinter` / `whenNotPaused` / `nonReentrant`.
-contract PromotionUniV2_Eth is ATokenDispatcherV2, IUnlockCallback {
+contract PromotionUniV2_Eth is ATokenDispatcherV2 {
     using SafeERC20 for IERC20;
 
     // ---------------------------------------------------------------------
@@ -84,14 +82,10 @@ contract PromotionUniV2_Eth is ATokenDispatcherV2, IUnlockCallback {
     address public constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
     /// @notice USDS — the Sky stablecoin received from the PSM `sellGem`. 18dp.
     address public constant USDS = 0xdC035D45d973E3EC169d2276DDab16f1e407384F;
-    /// @notice sUSDS — the ERC4626 wrapper the Balancer phUSD pool pairs against.
+    /// @notice sUSDS — the ERC4626 wrapper the phUSD/sUSDS Uniswap V2 pair (Leg A venue) pairs against.
     address public constant sUSDS = 0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD;
     /// @notice WETH — the native-ETH wrapper used as the Leg B routing hub.
     address public constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
-    /// @notice Balancer V3 vault.
-    address public constant BALANCER_VAULT = 0xbA1333333333a1BA1108E8412f11850A5C319bA9;
-    /// @notice The 50/50 weighted phUSD/sUSDS Balancer pool (the only pool used for Leg A).
-    address public constant BALANCER_POOL = 0x642BB6860b4776CC10b26B8f361Fd139E7f0db04;
     /// @notice Uniswap V2 Router02.
     address public constant UNIV2_ROUTER = 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D;
 
@@ -103,7 +97,7 @@ contract PromotionUniV2_Eth is ATokenDispatcherV2, IUnlockCallback {
     uint256 internal constant WAD = 1e18;
 
     // ---------------------------------------------------------------------
-    // Owner-settable infrastructure (hardcoded defaults; setters mirror BalancerPoolerV2)
+    // Owner-settable infrastructure (hardcoded defaults)
     // ---------------------------------------------------------------------
 
     /// @notice The Sky USDS↔USDC PSM (UsdsPsmWrapper) used by Leg A step 1. Non-zero.
@@ -142,7 +136,7 @@ contract PromotionUniV2_Eth is ATokenDispatcherV2, IUnlockCallback {
     // Donation state (copied from Uniboost, named per spec)
     // ---------------------------------------------------------------------
 
-    /// @notice Recipient of the donated USDC (the BalancerPooler batch-minter). address(0) disables
+    /// @notice Recipient of the donated USDC (the batch-minter). address(0) disables
     ///         the donation even if `donationSplit > 0`.
     address public batchMinter;
 
@@ -378,7 +372,7 @@ contract PromotionUniV2_Eth is ATokenDispatcherV2, IUnlockCallback {
     ///         `batchMinter` when the donation is enabled, retaining the rest for the next `pool()`.
     /// @dev The base then calls `hook.onDispatch(minter, amount)` with the GROSS amount, so
     ///      mint-debt accrues on the full dispatched USDC regardless of the donation (same
-    ///      convention as `Uniboost` / `BalancerPoolerV2`). Only the live-donation branch requires
+    ///      convention as `Uniboost`). Only the live-donation branch requires
     ///      a configured `nudgeStreamer`. MUST NOT re-declare base modifiers.
     function _dispatch(address, uint256 amount, bytes calldata /* extraData */ ) internal override {
         bool donationEnabled = batchMinter != address(0) && donationSplit > 0;
@@ -403,14 +397,15 @@ contract PromotionUniV2_Eth is ATokenDispatcherV2, IUnlockCallback {
     // ---------------------------------------------------------------------
 
     /// @notice Boosts the target pool: splits `amountIn` of retained USDC 60/30/10 — 60% to phUSD
-    ///         (Leg A, Balancer), 30% to promotion (Leg B, native ETH), 10% to WBTC (Leg C, direct
-    ///         UniV2). HALF the acquired phUSD is burned (permanent supply cut) so the pooled phUSD
+    ///         (Leg A, UniV2 phUSD/sUSDS), 30% to promotion (Leg B, native ETH), 10% to WBTC (Leg C,
+    ///         direct UniV2). HALF the acquired phUSD is burned (permanent supply cut) so the pooled phUSD
     ///         value (~30% of USDC) matches the pooled promotion value (~30% of USDC); the rest is
     ///         added as liquidity. The WBTC is retained as an insurance reserve (NOT pooled). LP
     ///         tokens accrue on the dispatcher (protocol-owned liquidity). Only callable by
     ///         authorized poolers.
     /// @param amountIn Absolute amount of retained USDC to pool. Nonzero, <= the current USDC balance.
-    /// @param minPhusdOut Slippage floor for phUSD out of the Balancer swap (Leg A, full pre-burn output).
+    /// @param minPhusdOut Slippage floor for phUSD out of the Leg A sUSDS→phUSD UniV2 swap (full
+    ///        pre-burn output). Must be non-zero: a zero floor is an unbounded-slippage swap.
     /// @param minEthOut Slippage floor for native ETH out of the USDC→ETH swap (Leg B step 1).
     /// @param minPromoOut Slippage floor for promotion out of the ETH→promotion swap (Leg B step 2).
     /// @param minWbtcOut Slippage floor for WBTC out of the USDC→WBTC swap (Leg C).
@@ -430,6 +425,7 @@ contract PromotionUniV2_Eth is ATokenDispatcherV2, IUnlockCallback {
     {
         require(amountIn > 0, "PromotionUniV2_Eth: nothing to pool");
         require(amountIn <= IERC20(USDC).balanceOf(address(this)), "PromotionUniV2_Eth: insufficient prime");
+        require(minPhusdOut > 0, "PromotionUniV2_Eth: zero phUSD floor");
 
         uint256 phusdAcquired;
         uint256 wbtcAcquired;
@@ -473,9 +469,9 @@ contract PromotionUniV2_Eth is ATokenDispatcherV2, IUnlockCallback {
         IERC20(promotionToken).forceApprove(UNIV2_ROUTER, 0);
     }
 
-    /// @dev Leg A: USDC →(PSM sellGem)→ USDS →(ERC4626 deposit)→ sUSDS →(Balancer swap)→ phUSD.
+    /// @dev Leg A: USDC →(PSM sellGem)→ USDS →(ERC4626 deposit)→ sUSDS →(UniV2 swap)→ phUSD.
     /// @param usdcAmount USDC (6dp) to convert.
-    /// @param minPhusdOut Slippage floor for the phUSD received from the Balancer swap.
+    /// @param minPhusdOut Slippage floor for the phUSD received from the UniV2 swap.
     /// @return phusdOut phUSD acquired.
     function _legA(uint256 usdcAmount, uint256 minPhusdOut) internal returns (uint256 phusdOut) {
         // Step 1: USDC -> USDS via the SKY PSM. PSM has no slippage; the `tin` fee is the risk.
@@ -484,11 +480,11 @@ contract PromotionUniV2_Eth is ATokenDispatcherV2, IUnlockCallback {
         uint256 usdsOut = ISkyPSM(psm).sellGem(address(this), usdcAmount);
         IERC20(USDC).forceApprove(psm, 0);
 
-        // Step 2: USDS -> sUSDS (the Balancer phUSD pool pairs against sUSDS, not USDS).
+        // Step 2: USDS -> sUSDS (the phUSD/sUSDS V2 pair pairs against sUSDS, not USDS).
         IERC20(USDS).forceApprove(sUSDS, usdsOut);
         uint256 shares = IERC4626(sUSDS).deposit(usdsOut, address(this));
 
-        // Step 3: sUSDS -> phUSD via the Balancer V3 low-level swap.
+        // Step 3: sUSDS -> phUSD via Router02 on the phUSD/sUSDS V2 pair.
         phusdOut = _swapSusdsForPhusd(shares, minPhusdOut);
     }
 
@@ -527,41 +523,19 @@ contract PromotionUniV2_Eth is ATokenDispatcherV2, IUnlockCallback {
         wbtcOut = amounts[amounts.length - 1];
     }
 
-    /// @dev Balancer V3 low-level EXACT_IN swap of `sharesIn` sUSDS for phUSD (min-out = `minPhusdOut`),
-    ///      via the vault `unlock` → `unlockCallback` reentrancy pattern.
+    /// @dev Router02 `swapExactTokensForTokens` of `sharesIn` sUSDS for phUSD along `[sUSDS, phUSD]`
+    ///      (the phUSD/sUSDS V2 pair), proceeds to this contract. The router enforces `minPhusdOut`
+    ///      (`INSUFFICIENT_OUTPUT_AMOUNT`). The allowance is exact and reset to zero afterwards.
     function _swapSusdsForPhusd(uint256 sharesIn, uint256 minPhusdOut) internal returns (uint256) {
-        bytes memory inner = abi.encode(sharesIn, minPhusdOut);
-        bytes memory ret =
-            IBalancerVault(BALANCER_VAULT).unlock(abi.encodeWithSelector(IUnlockCallback.unlockCallback.selector, inner));
-        // `unlock` returns the callback's raw returndata verbatim, which is the ABI-encoding of the
-        // callback's declared `bytes` return value (itself `abi.encode(amountOut)`). Unwrap the outer
-        // `bytes` first, then decode the inner word — decoding `ret` directly as a uint256 would read
-        // the ABI offset (0x20), silently collapsing amountOut to 32 and burning almost nothing.
-        return abi.decode(abi.decode(ret, (bytes)), (uint256));
-    }
-
-    /// @inheritdoc IUnlockCallback
-    /// @dev Only reachable via the vault during `unlock` (guarded by `msg.sender == BALANCER_VAULT`).
-    ///      Order: pay input (transfer) → swap → settle input → pull output (sendTo). `limitRaw` on
-    ///      an EXACT_IN swap is the min-out floor.
-    function unlockCallback(bytes calldata data) external override returns (bytes memory) {
-        require(msg.sender == BALANCER_VAULT, "PromotionUniV2_Eth: caller is not vault");
-        (uint256 sharesIn, uint256 minPhusdOut) = abi.decode(data, (uint256, uint256));
-
-        IERC20(sUSDS).safeTransfer(BALANCER_VAULT, sharesIn); // 1. pay input
-        VaultSwapParams memory p = VaultSwapParams({
-            kind: SwapKind.EXACT_IN,
-            pool: BALANCER_POOL,
-            tokenIn: IERC20(sUSDS),
-            tokenOut: IERC20(phUSD),
-            amountGivenRaw: sharesIn,
-            limitRaw: minPhusdOut,
-            userData: ""
-        });
-        (,, uint256 amountOut) = IBalancerVault(BALANCER_VAULT).swap(p); // 2. swap
-        IBalancerVault(BALANCER_VAULT).settle(IERC20(sUSDS), sharesIn); // 3. settle input
-        IBalancerVault(BALANCER_VAULT).sendTo(IERC20(phUSD), address(this), amountOut); // 4. pull output
-        return abi.encode(amountOut);
+        address[] memory path = new address[](2);
+        path[0] = sUSDS;
+        path[1] = phUSD;
+        IERC20(sUSDS).forceApprove(UNIV2_ROUTER, sharesIn);
+        uint256[] memory amounts = IUniswapV2Router02(UNIV2_ROUTER).swapExactTokensForTokens(
+            sharesIn, minPhusdOut, path, address(this), block.timestamp
+        );
+        IERC20(sUSDS).forceApprove(UNIV2_ROUTER, 0);
+        return amounts[amounts.length - 1];
     }
 
     // ---------------------------------------------------------------------

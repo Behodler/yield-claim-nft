@@ -185,7 +185,8 @@ contract PromotionUniV2_EthForkTest is Test {
     /// @dev Returns the pair's (sUSDS, phUSD) reserves, order-normalised.
     function _phusdSusdsReserves() internal view returns (uint256 rS, uint256 rP) {
         (uint112 r0, uint112 r1,) = IUniswapV2Pair(phusdSusdsPair).getReserves();
-        (rS, rP) = IUniswapV2Pair(phusdSusdsPair).token0() == sUSDS ? (uint256(r0), uint256(r1)) : (uint256(r1), uint256(r0));
+        (rS, rP) =
+            IUniswapV2Pair(phusdSusdsPair).token0() == sUSDS ? (uint256(r0), uint256(r1)) : (uint256(r1), uint256(r0));
     }
 
     function _provide(address token, uint256 amount) internal {
