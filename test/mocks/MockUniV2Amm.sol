@@ -71,6 +71,35 @@ contract MockUniV2AmmPair is ERC20 {
         require(adj0 * adj1 >= uint256(reserve0) * uint256(reserve1) * 1000 ** 2, "UniswapV2: K");
         _update();
     }
+
+    /// @dev Uniswap V2 `skim`: transfers each token's `balance - reserve` to `to`.
+    function skim(address to) external {
+        IERC20(token0).safeTransfer(to, IERC20(token0).balanceOf(address(this)) - reserve0);
+        IERC20(token1).safeTransfer(to, IERC20(token1).balanceOf(address(this)) - reserve1);
+    }
+
+    /// @dev Uniswap V2 `sync`: sets the reserves to the current balances.
+    function sync() external {
+        _update();
+    }
+}
+
+/// @dev Minimal Uniswap V2 factory: the `getPair` registry (both token orders), plus
+///      `createPair` (deploys a `MockUniV2AmmPair`) and an unguarded `setPair` so tests can
+///      register an arbitrary contract as the canonical pair.
+contract MockUniV2AmmFactory {
+    mapping(address => mapping(address => address)) public getPair;
+
+    function createPair(address tokenA, address tokenB) external returns (address p) {
+        require(getPair[tokenA][tokenB] == address(0), "UniswapV2: PAIR_EXISTS");
+        p = address(new MockUniV2AmmPair(tokenA, tokenB));
+        setPair(tokenA, tokenB, p);
+    }
+
+    function setPair(address tokenA, address tokenB, address p) public {
+        getPair[tokenA][tokenB] = p;
+        getPair[tokenB][tokenA] = p;
+    }
 }
 
 /// @dev Faithful-maths Uniswap V2 Router02 subset for a single known pair: the real
@@ -81,12 +110,17 @@ contract MockUniV2AmmRouter {
     using SafeERC20 for IERC20;
 
     MockUniV2AmmPair public immutable pair;
+    /// @dev The router's factory. Deployed here with `pair` registered as the canonical pair for
+    ///      its two tokens, mirroring a pair created through the real router's factory.
+    MockUniV2AmmFactory public immutable factory;
 
     bool public swapCalled;
     bool public addLiquidityCalled;
 
     constructor(MockUniV2AmmPair pair_) {
         pair = pair_;
+        factory = new MockUniV2AmmFactory();
+        factory.setPair(pair_.token0(), pair_.token1(), address(pair_));
     }
 
     function getAmountOut(uint256 amountIn, uint256 reserveIn, uint256 reserveOut) public pure returns (uint256) {

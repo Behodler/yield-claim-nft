@@ -10,6 +10,7 @@ import {ITokenDispatcherV2} from "../interfaces/ITokenDispatcherV2.sol";
 import {ISkyPSM} from "../interfaces/ISkyPSM.sol";
 import {IUniswapV2Router02} from "../interfaces/uniswap/IUniswapV2Router02.sol";
 import {IUniswapV2Pair} from "../interfaces/uniswap/IUniswapV2Pair.sol";
+import {IUniswapV2Factory} from "../interfaces/uniswap/IUniswapV2Factory.sol";
 import {INudgeStreamer} from "phoenix-nft-staking/INudgeStreamer.sol";
 
 /// @title UniPoolerV2
@@ -17,36 +18,52 @@ import {INudgeStreamer} from "phoenix-nft-staking/INudgeStreamer.sol";
 ///         pooler zap that sUSDS into a phUSD/sUSDS Uniswap V2 pair. The LP stays on this contract
 ///         as protocol-owned liquidity.
 /// @dev The replacement for the Balancer V3 pooler at NFT index 4 (Balancexit plan, Stage 1a). The
-///      mint path — `_dispatch` and `_psmDonate` — is copied verbatim from that contract (only the
-///      contract-name prefix of revert strings differs), so the NFT minter, the mint-debt hook and
-///      the donation stack see an identical dispatcher: USDS -> sUSDS wrap of the pooling share,
-///      plus the failure-isolated Sky PSM donation streamed to `batchMinter` via `nudgeStreamer`.
+///      mint path — `_dispatch` and `_psmDonate` — is copied from that contract (only revert-string
+///      prefixes, NatSpec, and the hook-not-set guard at the top of `_dispatch` differ; see "Hook
+///      must be set before the first mint"), so the NFT minter, the mint-debt hook and the
+///      donation stack see an identical dispatcher once its hook is set: USDS -> sUSDS wrap of the
+///      pooling share, plus the failure-isolated Sky PSM donation streamed to `batchMinter` via
+///      `nudgeStreamer`.
 ///
 ///      ### Donation (unchanged from the previous pooler)
 ///
 ///      The PSM delivers USDC to **this contract**, which `forceApprove`s the exact `gemAmt` to
 ///      `nudgeStreamer` and calls `collectNudge(batchMinter, gem, gemAmt)`. The streamer is
 ///      mandatory on the live-donation branch only. `_psmDonate` is wrapped in a
-///      `try this._psmDonate{} catch` envelope so a broken donation (PSM outage, `tout` above
-///      `maxTout`, streamer unset, stream unregistered) parks the swept USDS and emits
-///      `DonationSkipped` instead of reverting the mint; the next dispatch re-sweeps it.
+///      `try this._psmDonate{} catch` envelope so a donation call that reverts (PSM outage,
+///      `tout` above `maxTout`, streamer unset, stream unregistered) parks the swept USDS and
+///      emits `DonationSkipped` instead of reverting the mint; the next dispatch re-sweeps it.
+///      A sweep too small to buy one unit of gem (`gemAmt` floors to zero) is not a failure: it
+///      is a silent no-op that emits nothing, and the USDS likewise waits for the next sweep.
 ///
 ///      **Required ops ordering** (reversing the first two reverts `NudgeStreamer__NotWhitelisted`):
 ///        1. `batchMinter.setNudgeTokenWhitelist(gem /* USDC */, true)`
 ///        2. `nudgeStreamer.registerStream(batchMinter, gem, duration)`
 ///        3. `this.setNudgeStreamer(nudgeStreamer)`
 ///
-///      ### The zap: swap size computed on-chain from live reserves
+///      ### The zap: swap size computed on-chain from synced reserves
 ///
-///      `pool(sUSDSIn, minPhusdOut, minLP)` reads the pair's reserves at execution time and swaps
-///      exactly
+///      `pool(sUSDSIn, minPhusdOut, minLP)` first calls `pair.sync()`, then reads the pair's
+///      reserves and swaps exactly
 ///
 ///          s = (sqrt(r * (r * 3988009 + a * 3988000)) - r * 1997) / 1994
 ///
 ///      sUSDS -> phUSD (r = live sUSDS reserve, a = sUSDSIn, 0.30% fee; 3988009 = 1997^2,
 ///      3988000 = 4 * 997 * 1000, 1994 = 2 * 997). Swapping `s` leaves `(a - s)` sUSDS and the
 ///      bought phUSD in exactly the post-swap reserve ratio, so `addLiquidity` consumes both sides
-///      to within wei-level rounding dust. Because `s` is derived from the reserves the swap
+///      to within wei-level rounding dust.
+///
+///      The `sync()` is load-bearing. V2 `swap()` credits the input as `balance - reserve`, so
+///      tokens transferred to the pair without a sync (a donation) would be absorbed into our
+///      swap and LP mint while `s`, sized from the stale reserves, no longer balances the two
+///      legs: non-dust phUSD or sUSDS would be stranded here (e.g. ~229 phUSD on a 100k zap after
+///      a 0.5% donation) or `pool()` would revert on its own quote's floors. Syncing folds the
+///      donation into the reserves — to the pair's LPs, overwhelmingly this contract's POL — so
+///      `s` balances again. `skim()` is deliberately never called: it would hand the donation to
+///      an arbitrary recipient. `quotePool` cannot sync (it is `view`), so it sizes from the
+///      pair's token balances, which are exactly the reserves `sync()` will produce.
+///
+///      Because `s` is derived from the reserves the swap
 ///      actually executes against, a front-run changes `s` and the price we buy at but never the
 ///      leftover; the worst it can do is a worse price, and that is what `minPhusdOut` and `minLP`
 ///      bound. The UI calls `quotePool(sUSDSIn)` and passes its outputs, reduced by a tolerance,
@@ -61,6 +78,23 @@ import {INudgeStreamer} from "phoenix-nft-staking/INudgeStreamer.sol";
 ///      **Deliberately no price ceiling.** Pooling that pushes phUSD above the $1 mint price is
 ///      intended: arbitrageurs then mint phUSD through `PhusdStableMinter` and sell into the pair,
 ///      and every such mint adds collateral to the yield strategies.
+///
+///      ### Kill switches
+///
+///      - `incrementAuthVersion()` (owner) is the **pool-only** kill switch: it revokes every
+///        authorized pooler at once, so `pool()` stops while mints (`dispatch`) keep working.
+///      - `pause()` / `unpause()` come from the base and are `onlyMinter`, reachable only through
+///        `NFTMinterV2.setDispatcherActive`. `dispatch` is `whenNotPaused`, so pausing blocks
+///        dispatch and therefore every index-4 mint (and `pool()`, which is also gated).
+///        There is no `pauser()` getter, so the Pauser contract cannot register this dispatcher.
+///
+///      ### Hook must be set before the first mint
+///
+///      `_dispatch` reverts `UniPoolerV2__HookNotSet` while `hook` is still the
+///      DefaultDispatchHook the base constructor deployed, so a deployment that skips or
+///      reorders `setHook` makes every index-4 mint revert loudly instead of silently accruing
+///      zero phUSD mint-debt. Only that constructor-deployed instance is detected: an owner who
+///      deliberately installs a freshly deployed DefaultDispatchHook opts out of the guard.
 ///
 ///      Guards live on this concrete dispatcher, never the abstract base. `_dispatch` overrides
 ///      only the internal extension point; `onlyMinter` / `whenNotPaused` / `nonReentrant` live on
@@ -77,6 +111,10 @@ contract UniPoolerV2 is ATokenDispatcherV2 {
     address private immutable _router;
     address private immutable _pair;
     bool private immutable _sUSDSIsToken0;
+    /// @dev The DefaultDispatchHook the base constructor deployed. `_dispatch` reverts while
+    ///      `hook` still points at it. Named in the file's `_camelCase` immutable convention.
+    // forge-lint: disable-next-line(screaming-snake-case-immutable)
+    address private immutable _defaultHook;
 
     uint256 public authVersion;
     mapping(address => uint256) public poolerAuthVersion;
@@ -126,8 +164,11 @@ contract UniPoolerV2 is ATokenDispatcherV2 {
     ///         linear release to `batchMinter`.
     event BatchDonatedViaPSM(uint256 usdsSpent, uint256 usdcDonated, address indexed batchMinter);
 
-    /// @notice Emitted when a donation attempt is silently skipped (PSM outage / fee spike /
-    ///         dust). `usdsParked` USDS stays on the contract for the next dispatch to retry.
+    /// @notice Emitted when the donation call reverts (PSM outage, `tout` above `maxTout`,
+    ///         streamer unset, stream unregistered) and the mint proceeds without it.
+    ///         `usdsParked` USDS — the whole sweep — stays on the contract for the next dispatch
+    ///         to retry. A sweep whose `gemAmt` floors to zero is NOT a skip: it is a silent
+    ///         no-op that emits no event (the USDS still waits for the next sweep).
     event DonationSkipped(uint256 usdsParked);
 
     /// @notice The pair's tokens are not exactly {sUSDS, phUSD}.
@@ -144,6 +185,10 @@ contract UniPoolerV2 is ATokenDispatcherV2 {
     error UniPoolerV2__AmountTooSmall();
     /// @notice The LP minted is below the caller's floor.
     error UniPoolerV2__InsufficientLP(uint256 liquidity, uint256 minLP);
+    /// @notice `dispatch` was called while `hook` is still the constructor-deployed default.
+    error UniPoolerV2__HookNotSet();
+    /// @notice `pair_` is not the router factory's canonical sUSDS/phUSD pair (`expected`).
+    error UniPoolerV2__PairNotCanonical(address expected, address actual);
 
     modifier onlyAuthorizedPooler() {
         require(poolerAuthVersion[msg.sender] == authVersion, "UniPoolerV2: caller not authorized pooler");
@@ -153,8 +198,11 @@ contract UniPoolerV2 is ATokenDispatcherV2 {
     /// @param sUSDS_ The sUSDS ERC4626 wrapper; its `asset()` (USDS) becomes the prime token.
     /// @param phUSD_ phUSD.
     /// @param router_ Uniswap V2 Router02 (mainnet 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D).
-    /// @param pair_ The phUSD/sUSDS Uniswap V2 pair. It may be empty at construction: the cutover
-    ///        deploys the pooler before seeding the pair.
+    /// @param pair_ The phUSD/sUSDS Uniswap V2 pair. It must already exist as the router
+    ///        factory's canonical sUSDS/phUSD pair (`IUniswapV2Factory(router_.factory())
+    ///        .getPair(sUSDS_, phUSD_) == pair_`), so the pair whose reserves size the zap is the
+    ///        pair the router swaps and adds liquidity against. It may have zero reserves: the
+    ///        pair is created first, the pooler deployed, then the pair seeded.
     /// @param initialOwner The owner.
     constructor(address sUSDS_, address phUSD_, address router_, address pair_, address initialOwner)
         ATokenDispatcherV2(initialOwner)
@@ -169,12 +217,17 @@ contract UniPoolerV2 is ATokenDispatcherV2 {
         bool sFirst = t0 == sUSDS_ && t1 == phUSD_;
         if (!sFirst && !(t0 == phUSD_ && t1 == sUSDS_)) revert UniPoolerV2__PairTokenMismatch(t0, t1);
 
+        address canonical = IUniswapV2Factory(IUniswapV2Router02(router_).factory()).getPair(sUSDS_, phUSD_);
+        if (canonical != pair_) revert UniPoolerV2__PairNotCanonical(canonical, pair_);
+
         _sUSDS = sUSDS_;
         _primeToken = IERC4626(sUSDS_).asset();
         _phUSD = phUSD_;
         _router = router_;
         _pair = pair_;
         _sUSDSIsToken0 = sFirst;
+        // The base constructor has already run, so `hook` is its DefaultDispatchHook.
+        _defaultHook = address(hook);
         authVersion = 1;
     }
 
@@ -223,6 +276,7 @@ contract UniPoolerV2 is ATokenDispatcherV2 {
     }
 
     /// @notice Increments the auth version, mass-revoking all current pooler authorizations.
+    /// @dev The pool-only kill switch: `pool()` stops for every pooler; mints keep working.
     function incrementAuthVersion() external onlyOwner {
         authVersion += 1;
         emit AuthVersionIncremented(authVersion);
@@ -282,10 +336,14 @@ contract UniPoolerV2 is ATokenDispatcherV2 {
     ///      `balanceOf(USDS)` — not just this dispatch's share — so USDS stranded by a prior
     ///      failed donation is automatically retried (the recovery mechanism; no separate
     ///      retry function needed). The conversion is isolated in `try this._psmDonate{} catch`
-    ///      so any PSM failure (outage, fee spike, empty reserve, dust) parks the USDS instead
-    ///      of reverting the mint. The base class then calls `hook.onDispatch(minter, amount)`
+    ///      so a reverting donation (PSM outage, `tout` above `maxTout`, empty or short reserve,
+    ///      streamer unset, stream unregistered) parks the USDS and emits `DonationSkipped`
+    ///      instead of reverting the mint; a sweep whose `gemAmt` floors to zero is a silent
+    ///      no-op with no event. The base class then calls `hook.onDispatch(minter, amount)`
     ///      with the **gross** amount, so mint-debt accrues on the full dispatched USDS
     ///      regardless of donation outcome.
+    /// @dev Reverts `UniPoolerV2__HookNotSet` while `hook` is still the constructor-deployed
+    ///      DefaultDispatchHook (see contract dev notes); the revert fails the whole mint.
     /// @param amount The FOT-adjusted amount of USDS to dispatch.
     function _dispatch(
         address,
@@ -295,6 +353,8 @@ contract UniPoolerV2 is ATokenDispatcherV2 {
         internal
         override
     {
+        if (address(hook) == _defaultHook) revert UniPoolerV2__HookNotSet();
+
         bool donationEnabled = batchMinter != address(0) && psm != address(0) && batchDonationSize > 0;
 
         uint256 donationUSDS = donationEnabled ? (amount * batchDonationSize) / 100 : 0;
@@ -313,7 +373,8 @@ contract UniPoolerV2 is ATokenDispatcherV2 {
             if (remainingUSDS > 0) {
                 try this._psmDonate(remainingUSDS) {}
                 catch {
-                    emit DonationSkipped(remainingUSDS); // USDS parks on the contract.
+                    // The donation call reverted: the USDS parks on the contract for retry.
+                    emit DonationSkipped(remainingUSDS);
                 }
             }
         }
@@ -323,7 +384,9 @@ contract UniPoolerV2 is ATokenDispatcherV2 {
     ///         through the `nudgeStreamer`. Self-gated `external` so any revert (tout ceiling,
     ///         empty reserve, short reserve, streamer unset, stream not registered) rolls back
     ///         the entire approve+buyGem+collectNudge atomically — the `_dispatch` try/catch
-    ///         then leaves the swept USDS untouched (parked for the next dispatch to retry).
+    ///         then leaves the swept USDS untouched (parked for the next dispatch to retry) and
+    ///         emits `DonationSkipped`. A `gemAmt` that floors to zero returns without reverting
+    ///         and without any event: the USDS stays for the next sweep.
     /// @dev MUST be called only via `try this._psmDonate{}` from `_dispatch`.
     /// @dev Story 047: the streamer hop lives INSIDE this envelope on purpose. A streamer
     ///      misconfiguration therefore parks USDS and emits `DonationSkipped` rather than
@@ -348,8 +411,9 @@ contract UniPoolerV2 is ATokenDispatcherV2 {
         // The `gemAmt > 0` guard is load-bearing, not cosmetic: `collectNudge` reverts
         // `NudgeStreamer__ZeroAmount()` on a zero amount, so a dust-sized sweep whose gemAmt
         // floors to zero must short-circuit to a clean no-op here rather than propagate a
-        // revert into the caller's catch. The dust USDS simply stays put and is re-swept on the
-        // next dispatch, exactly as before.
+        // revert into the caller's catch. That no-op emits nothing (no `DonationSkipped`, no
+        // `BatchDonatedViaPSM`); the dust USDS simply stays put and is re-swept on the next
+        // dispatch.
         if (gemAmt > 0) {
             // Exact USDS the PSM will pull for this gemAmt (<= usdsAmount; remainder is dust).
             uint256 usdsSpent = gemAmt * conv * (WAD + tout) / WAD;
@@ -374,9 +438,9 @@ contract UniPoolerV2 is ATokenDispatcherV2 {
         }
     }
 
-    /// @notice Zaps `sUSDSIn` of the contract's sUSDS into the phUSD/sUSDS V2 pair. The swap
-    ///         amount is derived on-chain from the live reserves (see contract dev notes); the LP
-    ///         stays on this contract.
+    /// @notice Zaps `sUSDSIn` of the contract's sUSDS into the phUSD/sUSDS V2 pair. The pair is
+    ///         synced first, then the swap amount is derived on-chain from the synced reserves
+    ///         (see contract dev notes); the LP stays on this contract.
     /// @dev The router's `amountAMin`/`amountBMin` are 0: the two sides are sized from the same
     ///      reserves inside this transaction, so they are balanced by construction, and the
     ///      overall outcome is bounded by `minPhusdOut` (swap floor) and `minLP` (LP floor).
@@ -394,6 +458,8 @@ contract UniPoolerV2 is ATokenDispatcherV2 {
         uint256 available = IERC20(_sUSDS).balanceOf(address(this));
         if (sUSDSIn > available) revert UniPoolerV2__InsufficientSUSDS(sUSDSIn, available);
 
+        // Fold any unsynced donation into the reserves before sizing (see contract dev notes).
+        IUniswapV2Pair(_pair).sync();
         (uint256 rS,) = _reserves();
         uint256 s = _swapAmount(rS, sUSDSIn);
 
@@ -420,9 +486,11 @@ contract UniPoolerV2 is ATokenDispatcherV2 {
         emit Pooled(msg.sender, sUSDSIn, s, phusdOut, liquidity);
     }
 
-    /// @notice Quotes `pool(sUSDSIn, …)` against the current reserves. The UI passes
+    /// @notice Quotes `pool(sUSDSIn, …)` against the pair's live token balances. The UI passes
     ///         `phusdOut` and `expectedLP`, reduced by a tolerance, as `pool`'s floors.
-    /// @dev Reverts `UniPoolerV2__EmptyPair` on an empty pair and `UniPoolerV2__AmountTooSmall`
+    /// @dev Sizes from `balanceOf(pair)` rather than `getReserves()` because `pool()` syncs
+    ///      before sizing, and the synced reserves are exactly those balances; quoting from stale
+    ///      reserves after an unsynced donation would mis-size the zap and the floors. Reverts `UniPoolerV2__EmptyPair` on an empty pair and `UniPoolerV2__AmountTooSmall`
     ///      when the derived swap is zero. Does not check the contract's balance, so it can quote
     ///      hypothetical amounts. `expectedLP` assumes the factory protocol fee is off; when it is
     ///      on, the pair mints the fee share before ours, which only raises our LP, so the quote
@@ -431,7 +499,7 @@ contract UniPoolerV2 is ATokenDispatcherV2 {
     /// @return phusdOut The phUSD that swap returns (0.30% fee, V2 `getAmountOut`).
     /// @return expectedLP The LP `addLiquidity` will mint.
     function quotePool(uint256 sUSDSIn) external view returns (uint256 swapIn, uint256 phusdOut, uint256 expectedLP) {
-        (uint256 rS, uint256 rP) = _reserves();
+        (uint256 rS, uint256 rP) = _balances();
         swapIn = _swapAmount(rS, sUSDSIn);
 
         uint256 inWithFee = swapIn * 997;
@@ -450,11 +518,20 @@ contract UniPoolerV2 is ATokenDispatcherV2 {
         expectedLP = Math.min((amtS * ts) / rS2, (amtP * ts) / rP2);
     }
 
-    /// @dev Live (sUSDS, phUSD) reserves. Reverts on an empty pair.
+    /// @dev Stored (sUSDS, phUSD) reserves — synced by `pool()` just before. Reverts on an
+    ///      empty pair.
     function _reserves() internal view returns (uint256 rS, uint256 rP) {
         (uint112 r0, uint112 r1,) = IUniswapV2Pair(_pair).getReserves();
         (rS, rP) = _sUSDSIsToken0 ? (uint256(r0), uint256(r1)) : (uint256(r1), uint256(r0));
         if (rS == 0 || rP == 0) revert UniPoolerV2__EmptyPair();
+    }
+
+    /// @dev The pair's (sUSDS, phUSD) token balances — the reserves `sync()` would set. Reverts
+    ///      on an empty pair, exactly as `_reserves()` does after a sync.
+    function _balances() internal view returns (uint256 bS, uint256 bP) {
+        bS = IERC20(_sUSDS).balanceOf(_pair);
+        bP = IERC20(_phUSD).balanceOf(_pair);
+        if (bS == 0 || bP == 0) revert UniPoolerV2__EmptyPair();
     }
 
     /// @dev Closed-form optimal single-sided zap swap for a 0.30%-fee constant-product pair:

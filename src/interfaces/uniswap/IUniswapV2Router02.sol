@@ -4,8 +4,12 @@ pragma solidity ^0.8.20;
 /// @title IUniswapV2Router02 (minimal)
 /// @notice Minimal Uniswap V2 Router02 interface — the functions the dispatchers need
 ///         (`swapExactTokensForTokens` / `swapExactTokensForETH` / `swapExactETHForTokens`
-///         for the buy legs and `addLiquidity` for the pool add).
+///         for the buy legs, `addLiquidity` for the pool add, and `factory` for UniPoolerV2's
+///         canonical-pair check).
 interface IUniswapV2Router02 {
+    /// @notice The Uniswap V2 factory whose pairs this router swaps and adds liquidity against.
+    function factory() external view returns (address);
+
     function swapExactTokensForTokens(
         uint256 amountIn,
         uint256 amountOutMin,

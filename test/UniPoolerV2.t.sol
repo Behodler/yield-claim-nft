@@ -13,7 +13,9 @@ import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {MockERC4626} from "./mocks/MockERC4626.sol";
 import {MockSkyPSM} from "./mocks/MockSkyPSM.sol";
 import {MockNudgeBatchMinter} from "./mocks/MockNudgeBatchMinter.sol";
-import {MockUniV2AmmPair, MockUniV2AmmRouter} from "./mocks/MockUniV2Amm.sol";
+import {MockUniV2AmmPair, MockUniV2AmmRouter, MockUniV2AmmFactory} from "./mocks/MockUniV2Amm.sol";
+import {DefaultDispatchHook} from "../src/hooks/DefaultDispatchHook.sol";
+import {NFTMinterV2} from "../src/NFTMinterV2.sol";
 import {NudgeStreamer} from "phoenix-nft-staking/NudgeStreamer.sol";
 
 /// @dev Mock ERC20 with configurable decimals for testing.
@@ -56,6 +58,9 @@ contract UniPoolerV2Test is Test {
     UPMockERC20 public phusd;
     MockUniV2AmmPair public pair;
     MockUniV2AmmRouter public router;
+    /// @dev Installed in setUp: UniPoolerV2 refuses to dispatch while `hook` is still the
+    ///      DefaultDispatchHook its base constructor deployed (story 051, ycn20l21).
+    MockDispatchHook public setUpHook;
 
     address public owner = address(this);
     address public minter = address(0xBEEF);
@@ -74,6 +79,8 @@ contract UniPoolerV2Test is Test {
         pooler = new UniPoolerV2(address(sUsds), address(phusd), address(router), address(pair), owner);
         pooler.setMinter(minter);
         pooler.setAuthorizedPooler(authorizedPooler, true);
+        setUpHook = new MockDispatchHook();
+        pooler.setHook(IDispatchHook(address(setUpHook)));
 
         _ensurePSM();
         pooler.setNudgeStreamer(address(streamer));
@@ -204,12 +211,14 @@ contract UniPoolerV2Test is Test {
 
     function test_constructor_acceptsSUSDSAsToken0() public {
         FakePairTokens fake = new FakePairTokens(address(sUsds), address(phusd));
+        router.factory().setPair(address(sUsds), address(phusd), address(fake)); // canonical
         UniPoolerV2 p = new UniPoolerV2(address(sUsds), address(phusd), address(router), address(fake), owner);
         assertTrue(p.sUSDSIsToken0(), "sUSDS recorded as token0");
     }
 
     function test_constructor_acceptsSUSDSAsToken1() public {
         FakePairTokens fake = new FakePairTokens(address(phusd), address(sUsds));
+        router.factory().setPair(address(sUsds), address(phusd), address(fake)); // canonical
         UniPoolerV2 p = new UniPoolerV2(address(sUsds), address(phusd), address(router), address(fake), owner);
         assertFalse(p.sUSDSIsToken0(), "sUSDS recorded as token1");
     }
@@ -595,6 +604,7 @@ contract UniPoolerV2Test is Test {
             assertEq(up.sUSDSIsToken0(), sFirst);
             up.setMinter(minter);
             up.setAuthorizedPooler(authorizedPooler, true);
+            up.setHook(IDispatchHook(address(new MockDispatchHook())));
 
             // seed pair (skewed so a mixed-up index would be caught)
             _dealSUSDS(address(p), 10_000e18);
@@ -1017,7 +1027,15 @@ contract UniPoolerV2Test is Test {
         pooler.setBatchDonationSize(size);
     }
 
+    /// @dev A fresh pooler with the minter wired and a recording hook installed (so it can
+    ///      dispatch), but no streamer/donation config.
     function _freshPooler() internal returns (UniPoolerV2 fresh) {
+        fresh = _freshPoolerNoHook();
+        fresh.setHook(IDispatchHook(address(new MockDispatchHook())));
+    }
+
+    /// @dev A fresh pooler exactly as deployed: `hook` is still the base's DefaultDispatchHook.
+    function _freshPoolerNoHook() internal returns (UniPoolerV2 fresh) {
         fresh = new UniPoolerV2(address(sUsds), address(phusd), address(router), address(pair), owner);
         fresh.setMinter(minter);
     }
@@ -1496,5 +1514,245 @@ contract UniPoolerV2Test is Test {
 
         assertEq(usds.balanceOf(address(pooler)), 200e18, "parked USDS untouched by pool()");
         assertGt(pair.balanceOf(address(pooler)), 0, "only sUSDS pooled");
+    }
+
+    // =========================================================================
+    // Story 051 — ycn20l21: dispatch reverts while the hook is still the default
+    // =========================================================================
+
+    function test_hookGuard_freshPooler_dispatchRevertsHookNotSet() public {
+        UniPoolerV2 fresh = _freshPoolerNoHook();
+        usds.mint(address(fresh), 100e18);
+
+        vm.prank(minter);
+        vm.expectRevert(UniPoolerV2.UniPoolerV2__HookNotSet.selector);
+        fresh.dispatch(minter, 100e18, "");
+        assertEq(sUsds.balanceOf(address(fresh)), 0, "nothing wrapped on the reverted dispatch");
+    }
+
+    function test_hookGuard_afterSetHook_dispatchSucceedsAndCallsHookOnce() public {
+        UniPoolerV2 fresh = _freshPoolerNoHook();
+        usds.mint(address(fresh), 100e18);
+        vm.prank(minter);
+        vm.expectRevert(UniPoolerV2.UniPoolerV2__HookNotSet.selector);
+        fresh.dispatch(minter, 100e18, "");
+
+        MockDispatchHook h = new MockDispatchHook();
+        fresh.setHook(IDispatchHook(address(h)));
+        vm.prank(minter);
+        fresh.dispatch(minter, 100e18, "");
+
+        assertEq(h.callCount(), 1, "hook called exactly once");
+        assertEq(h.lastAmount(), 100e18, "hook sees the gross amount");
+        assertEq(sUsds.balanceOf(address(fresh)), 100e18, "wrapped once hooked");
+    }
+
+    /// @dev Pointing `hook` back at the constructor-deployed default re-arms the guard.
+    function test_hookGuard_resettingToConstructorDefault_revertsAgain() public {
+        UniPoolerV2 fresh = _freshPoolerNoHook();
+        address constructorDefault = address(fresh.hook());
+        fresh.setHook(IDispatchHook(address(new MockDispatchHook())));
+        fresh.setHook(IDispatchHook(constructorDefault));
+
+        usds.mint(address(fresh), 1e18);
+        vm.prank(minter);
+        vm.expectRevert(UniPoolerV2.UniPoolerV2__HookNotSet.selector);
+        fresh.dispatch(minter, 1e18, "");
+    }
+
+    /// @dev Documented escape hatch: only the constructor-deployed default is detected. An owner
+    ///      who deliberately installs a fresh DefaultDispatchHook opts out of the guard.
+    function test_hookGuard_freshDefaultDispatchHook_isDeliberateBypass() public {
+        UniPoolerV2 fresh = _freshPoolerNoHook();
+        fresh.setHook(IDispatchHook(address(new DefaultDispatchHook())));
+        usds.mint(address(fresh), 1e18);
+        vm.prank(minter);
+        fresh.dispatch(minter, 1e18, "");
+        assertEq(sUsds.balanceOf(address(fresh)), 1e18, "deliberate opt-out dispatches");
+    }
+
+    /// @dev The revert bubbles through NFTMinterV2._executeMint: an index-4 mint against an
+    ///      un-hooked pooler fails loudly instead of accruing zero mint-debt.
+    function test_hookGuard_nftMinterMint_revertsUntilHookSet() public {
+        NFTMinterV2 nft = new NFTMinterV2(owner);
+        UniPoolerV2 fresh = new UniPoolerV2(address(sUsds), address(phusd), address(router), address(pair), owner);
+        fresh.setMinter(address(nft));
+        nft.registerDispatcher(address(fresh), 100e18, 0);
+        uint256 index = nft.dispatcherToIndex(address(fresh));
+
+        address buyer = address(0xB0BA);
+        usds.mint(buyer, 200e18);
+        vm.prank(buyer);
+        usds.approve(address(nft), type(uint256).max);
+
+        vm.prank(buyer);
+        vm.expectRevert(UniPoolerV2.UniPoolerV2__HookNotSet.selector);
+        nft.mint(index, buyer);
+        assertEq(nft.balanceOf(buyer, index), 0, "no NFT minted");
+        assertEq(usds.balanceOf(buyer), 200e18, "payment rolled back");
+
+        MockDispatchHook h = new MockDispatchHook();
+        fresh.setHook(IDispatchHook(address(h)));
+        vm.prank(buyer);
+        nft.mint(index, buyer);
+        assertEq(nft.balanceOf(buyer, index), 1, "mint succeeds once hooked");
+        assertEq(h.callCount(), 1, "hook accrued on the mint");
+        assertEq(sUsds.balanceOf(address(fresh)), 100e18, "payment wrapped");
+    }
+
+    // =========================================================================
+    // Story 051 — ycn20l24: an unsynced donation to the pair cannot skew the zap
+    // =========================================================================
+
+    function _donateToPair(bool sUSDSSide, uint256 amount) internal {
+        if (sUSDSSide) _dealSUSDS(address(pair), amount);
+        else phusd.mint(address(pair), amount);
+    }
+
+    function _unsyncedDonation_leftoverIsDust(bool sUSDSSide) internal {
+        uint256 r0 = 100_000e18;
+        _seedPair(r0, r0);
+        _donateToPair(sUSDSSide, (r0 * 5) / 1000); // 0.5%, not synced
+        uint256 a = 100_000e18;
+        _seedSUSDS(a);
+
+        // Loose floors: this test is about what the zap leaves behind, not the floors.
+        vm.prank(authorizedPooler);
+        pooler.pool(a, 1, 1);
+
+        (uint256 rS, uint256 rP) = _reservesSP();
+        _assertDust(sUsds.balanceOf(address(pooler)), phusd.balanceOf(address(pooler)), rS, rP, a, r0);
+    }
+
+    function test_pool_unsyncedSUSDSDonation_leftoverIsDust() public {
+        _unsyncedDonation_leftoverIsDust(true);
+    }
+
+    function test_pool_unsyncedPhUSDDonation_leftoverIsDust() public {
+        _unsyncedDonation_leftoverIsDust(false);
+    }
+
+    function _unsyncedDonation_quoteThenPool(bool sUSDSSide) internal {
+        uint256 r0 = 100_000e18;
+        _seedPair(r0, r0);
+        _donateToPair(sUSDSSide, (r0 * 5) / 1000);
+        uint256 a = 100_000e18;
+        _seedSUSDS(a);
+
+        // Exact quote outputs as floors: must not revert InsufficientLP / INSUFFICIENT_OUTPUT.
+        (uint256 qSwap, uint256 qOut, uint256 qLP) = pooler.quotePool(a);
+        vm.expectEmit(true, false, false, true, address(pooler));
+        emit Pooled(authorizedPooler, a, qSwap, qOut, qLP);
+        vm.prank(authorizedPooler);
+        pooler.pool(a, qOut, qLP);
+        assertEq(pair.balanceOf(address(pooler)), qLP, "quote exact after an unsynced donation");
+    }
+
+    function test_quoteThenPool_afterUnsyncedSUSDSDonation_succeeds() public {
+        _unsyncedDonation_quoteThenPool(true);
+    }
+
+    function test_quoteThenPool_afterUnsyncedPhUSDDonation_succeeds() public {
+        _unsyncedDonation_quoteThenPool(false);
+    }
+
+    /// @dev The donation is folded into the reserves (accrues to LPs), never skimmed away.
+    function test_pool_syncFoldsDonationIntoReserves_noSkim() public {
+        _seedPair(10_000e18, 10_000e18);
+        _donateToPair(true, 50e18);
+        _donateToPair(false, 30e18);
+        _seedSUSDS(1_000e18);
+        uint256 pairS = sUsds.balanceOf(address(pair));
+        uint256 pairP = phusd.balanceOf(address(pair));
+
+        _quoteAndPool(1_000e18);
+
+        (uint256 rS, uint256 rP) = _reservesSP();
+        assertEq(rS, sUsds.balanceOf(address(pair)), "reserves == balances (sUSDS)");
+        assertEq(rP, phusd.balanceOf(address(pair)), "reserves == balances (phUSD)");
+        assertGe(rS, pairS + 1_000e18 - _dustTol(1, 1), "donated sUSDS stayed in the pair");
+        assertGe(rP + phusd.balanceOf(address(pooler)), pairP, "donated phUSD stayed in the pair");
+    }
+
+    /// @dev One-sided balance on an empty pair is still an empty pair for both quote and pool.
+    function test_emptyPair_oneSidedDonation_stillEmptyPair() public {
+        _donateToPair(true, 100e18);
+        vm.expectRevert(UniPoolerV2.UniPoolerV2__EmptyPair.selector);
+        pooler.quotePool(100e18);
+
+        _seedSUSDS(100e18);
+        vm.prank(authorizedPooler);
+        vm.expectRevert(UniPoolerV2.UniPoolerV2__EmptyPair.selector);
+        pooler.pool(100e18, 1, 1);
+    }
+
+    function testFuzz_pool_zapDust_unsyncedDonation(uint96 rS, uint96 rP, uint96 a, uint96 d, bool sUSDSSide) public {
+        rS = uint96(bound(rS, 1e18, 1e27));
+        rP = uint96(bound(rP, uint256(rS) / 1000, uint256(rS) * 1000));
+        a = uint96(bound(a, 1e12, uint256(rS) * 20));
+        d = uint96(bound(d, 1, (sUSDSSide ? uint256(rS) : uint256(rP)) / 20)); // up to 5%
+        _seedPair(rS, rP);
+        _donateToPair(sUSDSSide, d);
+        _seedSUSDS(a);
+
+        (, uint256 qOut, uint256 qLP) = pooler.quotePool(a);
+        vm.assume(qOut > 0 && qLP > 0);
+        vm.prank(authorizedPooler);
+        pooler.pool(a, qOut, qLP);
+        assertEq(pair.balanceOf(address(pooler)), qLP, "quote exact");
+
+        (uint256 nS, uint256 nP) = _reservesSP();
+        _assertDust(
+            sUsds.balanceOf(address(pooler)),
+            phusd.balanceOf(address(pooler)),
+            nS,
+            nP,
+            a,
+            sUSDSSide ? uint256(rS) + d : uint256(rS)
+        );
+    }
+
+    // =========================================================================
+    // Story 051 — canonical-pair binding
+    // =========================================================================
+
+    function _pairNotCanonical(address canonical, address given) internal pure returns (bytes memory) {
+        return abi.encodeWithSelector(UniPoolerV2.UniPoolerV2__PairNotCanonical.selector, canonical, given);
+    }
+
+    function test_constructor_revertsOnNonCanonicalLookalikePair() public {
+        MockUniV2AmmPair lookalike = new MockUniV2AmmPair(address(sUsds), address(phusd));
+        vm.expectRevert(_pairNotCanonical(address(pair), address(lookalike)));
+        new UniPoolerV2(address(sUsds), address(phusd), address(router), address(lookalike), owner);
+    }
+
+    function test_constructor_revertsWhenFactoryHasNoPair() public {
+        router.factory().setPair(address(sUsds), address(phusd), address(0));
+        vm.expectRevert(_pairNotCanonical(address(0), address(pair)));
+        new UniPoolerV2(address(sUsds), address(phusd), address(router), address(pair), owner);
+    }
+
+    function test_constructor_acceptsCanonicalPair_bothOrders() public {
+        for (uint256 k = 0; k < 2; k++) {
+            UPMockERC20 ph = _deployPhusdOrdered(k == 0);
+            MockUniV2AmmFactory f = router.factory();
+            address p = f.createPair(address(ph), address(sUsds));
+            assertEq(f.getPair(address(sUsds), address(ph)), p, "registered both orders");
+            // A router bound to that factory pair.
+            MockUniV2AmmRouter r = new MockUniV2AmmRouter(MockUniV2AmmPair(p));
+            UniPoolerV2 up = new UniPoolerV2(address(sUsds), address(ph), address(r), p, owner);
+            assertEq(up.pair(), p);
+            assertEq(up.sUSDSIsToken0(), k == 0);
+        }
+    }
+
+    /// @dev Wrong tokens still fail on the token check, even though the factory has no such pair.
+    function test_constructor_wrongTokens_stillPairTokenMismatch() public {
+        UPMockERC20 other = new UPMockERC20("Other", "OTH", 18);
+        MockUniV2AmmPair wrong = new MockUniV2AmmPair(address(sUsds), address(other));
+        router.factory().setPair(address(sUsds), address(other), address(wrong));
+        (address t0, address t1) = (wrong.token0(), wrong.token1());
+        vm.expectRevert(abi.encodeWithSelector(UniPoolerV2.UniPoolerV2__PairTokenMismatch.selector, t0, t1));
+        new UniPoolerV2(address(sUsds), address(phusd), address(router), address(wrong), owner);
     }
 }

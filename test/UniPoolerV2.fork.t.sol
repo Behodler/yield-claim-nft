@@ -8,6 +8,19 @@ import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {UniPoolerV2} from "../src/dispatchers/UniPoolerV2.sol";
 import {IUniswapV2Router02} from "../src/interfaces/uniswap/IUniswapV2Router02.sol";
 import {IUniswapV2Pair} from "../src/interfaces/uniswap/IUniswapV2Pair.sol";
+import {IDispatchHook} from "../src/interfaces/IDispatchHook.sol";
+import {MockDispatchHook} from "./mocks/MockDispatchHook.sol";
+
+/// @dev Reports the right token pair but is not the factory's pair (canonical-pair check).
+contract ForkLookalikePair {
+    address public token0;
+    address public token1;
+
+    constructor(address t0, address t1) {
+        token0 = t0;
+        token1 = t1;
+    }
+}
 
 interface IUniswapV2FactoryMin {
     function getPair(address, address) external view returns (address);
@@ -20,6 +33,9 @@ interface IUniswapV2FactoryMin {
 /// @dev RPC wiring follows `PromotionUniV2_Eth.t.sol`: `MAINNET_RPC_URL` (or the `.envrc` name
 ///      `RPC_MAINNET`) must point at an ARCHIVE endpoint because `FORK_BLOCK` is pinned. Unlike that
 ///      suite there is no public-node fallback: with neither variable set every test here SKIPS.
+///      Story 051: setUp creates the pair through the real factory BEFORE deploying the pooler (the
+///      constructor now requires the factory's canonical pair) and installs a recording hook (the
+///      pooler refuses to dispatch while its hook is still the constructor default).
 contract UniPoolerV2ForkTest is Test {
     using SafeERC20 for IERC20;
 
@@ -58,6 +74,7 @@ contract UniPoolerV2ForkTest is Test {
         pooler = new UniPoolerV2(sUSDS, phUSD, UNIV2_ROUTER, pair, owner);
         pooler.setMinter(minter);
         pooler.setAuthorizedPooler(authorizedPooler, true);
+        pooler.setHook(IDispatchHook(address(new MockDispatchHook())));
     }
 
     modifier onlyForked() {
@@ -88,6 +105,54 @@ contract UniPoolerV2ForkTest is Test {
     function test_fork_constructorRecognisesRealPair() public onlyForked {
         assertEq(pooler.primeToken(), USDS, "primeToken is USDS");
         assertEq(pooler.sUSDSIsToken0(), IUniswapV2Pair(pair).token0() == sUSDS, "ordering recorded");
+        assertEq(IUniswapV2Router02(UNIV2_ROUTER).factory(), UNIV2_FACTORY, "real router's factory");
+    }
+
+    function test_fork_constructorRejectsNonCanonicalPair() public onlyForked {
+        ForkLookalikePair fake = new ForkLookalikePair(IUniswapV2Pair(pair).token0(), IUniswapV2Pair(pair).token1());
+        vm.expectRevert(abi.encodeWithSelector(UniPoolerV2.UniPoolerV2__PairNotCanonical.selector, pair, address(fake)));
+        new UniPoolerV2(sUSDS, phUSD, UNIV2_ROUTER, address(fake), owner);
+    }
+
+    function test_fork_dispatchRevertsUntilHookSet() public onlyForked {
+        UniPoolerV2 fresh = new UniPoolerV2(sUSDS, phUSD, UNIV2_ROUTER, pair, owner);
+        fresh.setMinter(minter);
+        deal(USDS, address(fresh), 1_000e18);
+        vm.prank(minter);
+        vm.expectRevert(UniPoolerV2.UniPoolerV2__HookNotSet.selector);
+        fresh.dispatch(minter, 1_000e18, "");
+    }
+
+    /// @dev ycn20l24 on the real pair: seeded 100k/100k, a 0.5% donation transferred without a
+    ///      sync, then a 100k zap. Pre-fix this stranded ~229 phUSD on the pooler; now the pooler
+    ///      syncs first and the leftover is wei-level dust, with the quote's floors honoured.
+    function _forkUnsyncedDonationZap(address donatedToken) internal {
+        deal(donatedToken, address(0xD0E), 500e18);
+        vm.prank(address(0xD0E));
+        IERC20(donatedToken).safeTransfer(pair, 500e18);
+
+        uint256 a = 100_000e18;
+        deal(sUSDS, address(pooler), a);
+        (, uint256 phusdOut, uint256 expectedLP) = pooler.quotePool(a);
+
+        vm.prank(authorizedPooler);
+        pooler.pool(a, phusdOut, expectedLP);
+
+        assertGe(IERC20(pair).balanceOf(address(pooler)), expectedLP, "LP >= quote");
+        // ~1:1 pair and a == r0: the unit suite's `_dustTol` bound is (4+4+4)*(2+1) = 36 wei.
+        assertLe(IERC20(sUSDS).balanceOf(address(pooler)), 36, "sUSDS dust only");
+        assertLe(IERC20(phUSD).balanceOf(address(pooler)), 36, "phUSD dust only");
+        (uint112 r0, uint112 r1,) = IUniswapV2Pair(pair).getReserves();
+        assertEq(uint256(r0), IERC20(IUniswapV2Pair(pair).token0()).balanceOf(pair), "synced (token0)");
+        assertEq(uint256(r1), IERC20(IUniswapV2Pair(pair).token1()).balanceOf(pair), "synced (token1)");
+    }
+
+    function test_fork_unsyncedSUSDSDonation_zapLeavesDust() public onlyForked {
+        _forkUnsyncedDonationZap(sUSDS);
+    }
+
+    function test_fork_unsyncedPhUSDDonation_zapLeavesDust() public onlyForked {
+        _forkUnsyncedDonationZap(phUSD);
     }
 
     function test_fork_quoteThenPool_realRouter() public onlyForked {
