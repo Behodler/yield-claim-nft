@@ -138,27 +138,34 @@ contract MockUniV2AmmRouter {
     ) external returns (uint256 amountA, uint256 amountB, uint256 liquidity) {
         require(deadline >= block.timestamp, "UniswapV2Router: EXPIRED");
         require(
-            (tokenA == pair.token0() && tokenB == pair.token1()) || (tokenA == pair.token1() && tokenB == pair.token0()),
+            (tokenA == pair.token0() && tokenB == pair.token1())
+                || (tokenA == pair.token1() && tokenB == pair.token0()),
             "MockUniV2AmmRouter: unknown pair"
         );
         addLiquidityCalled = true;
-        (uint256 rA, uint256 rB) = _reservesFor(tokenA);
-        if (rA == 0 && rB == 0) {
-            (amountA, amountB) = (amountADesired, amountBDesired);
-        } else {
-            uint256 amountBOptimal = quote(amountADesired, rA, rB);
-            if (amountBOptimal <= amountBDesired) {
-                require(amountBOptimal >= amountBMin, "UniswapV2Router: INSUFFICIENT_B_AMOUNT");
-                (amountA, amountB) = (amountADesired, amountBOptimal);
-            } else {
-                uint256 amountAOptimal = quote(amountBDesired, rB, rA);
-                assert(amountAOptimal <= amountADesired);
-                require(amountAOptimal >= amountAMin, "UniswapV2Router: INSUFFICIENT_A_AMOUNT");
-                (amountA, amountB) = (amountAOptimal, amountBDesired);
-            }
-        }
+        (amountA, amountB) = _optimal(tokenA, amountADesired, amountBDesired, amountAMin, amountBMin);
         IERC20(tokenA).safeTransferFrom(msg.sender, address(pair), amountA);
         IERC20(tokenB).safeTransferFrom(msg.sender, address(pair), amountB);
         liquidity = pair.mint(to);
+    }
+
+    function _optimal(
+        address tokenA,
+        uint256 amountADesired,
+        uint256 amountBDesired,
+        uint256 amountAMin,
+        uint256 amountBMin
+    ) internal view returns (uint256 amountA, uint256 amountB) {
+        (uint256 rA, uint256 rB) = _reservesFor(tokenA);
+        if (rA == 0 && rB == 0) return (amountADesired, amountBDesired);
+        uint256 amountBOptimal = quote(amountADesired, rA, rB);
+        if (amountBOptimal <= amountBDesired) {
+            require(amountBOptimal >= amountBMin, "UniswapV2Router: INSUFFICIENT_B_AMOUNT");
+            return (amountADesired, amountBOptimal);
+        }
+        uint256 amountAOptimal = quote(amountBDesired, rB, rA);
+        assert(amountAOptimal <= amountADesired);
+        require(amountAOptimal >= amountAMin, "UniswapV2Router: INSUFFICIENT_A_AMOUNT");
+        return (amountAOptimal, amountBDesired);
     }
 }

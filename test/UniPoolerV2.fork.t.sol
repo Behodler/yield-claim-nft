@@ -106,8 +106,10 @@ contract UniPoolerV2ForkTest is Test {
         // With the factory's protocol fee on, the pair mints the fee share before ours, which only
         // raises our LP; with it off the quote is exact. Either way the quote is a floor.
         assertGe(lp, expectedLP, "LP >= quote");
-        assertLe(IERC20(sUSDS).balanceOf(address(pooler)), 2, "sUSDS dust only");
-        assertLe(IERC20(phUSD).balanceOf(address(pooler)), 4, "phUSD dust only");
+        // Wei-level dust: ~1:1 pair and a < r, so the unit suite's rounding bound is 24 wei
+        // (see `_dustTol` in UniPoolerV2.t.sol for the derivation).
+        assertLe(IERC20(sUSDS).balanceOf(address(pooler)), 24, "sUSDS dust only");
+        assertLe(IERC20(phUSD).balanceOf(address(pooler)), 24, "phUSD dust only");
         assertEq(IERC20(sUSDS).allowance(address(pooler), UNIV2_ROUTER), 0, "allowance reset");
         assertEq(IERC20(phUSD).allowance(address(pooler), UNIV2_ROUTER), 0, "allowance reset");
     }

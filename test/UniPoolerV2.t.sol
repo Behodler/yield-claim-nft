@@ -137,6 +137,33 @@ contract UniPoolerV2Test is Test {
         leftP = phusd.balanceOf(address(pooler));
     }
 
+    /// @dev Wei-level dust tolerance, in raw units of either token, given the POST-pool reserves
+    ///      (rS, rP), the zap size `a` and the PRE-pool sUSDS reserve `r0`. The closed form is
+    ///      exact over the reals; the leftover comes only from integer floors — `s` (sqrt +
+    ///      division, < ~1 wei sUSDS), `getAmountOut` (< 1 wei phUSD) and the router's `quote`
+    ///      (< 1 wei). A 1-wei phUSD shortfall ε propagates through `quote` as
+    ///      leftover ≈ ε·(aRem/out + aRem/rP') = ε·p'·(1 + aRem/rS'), where p' is the post-swap
+    ///      price and aRem/rS' < a/r0. So: a few wei, times the pair price (either direction),
+    ///      times (2 + a/r0). For a 1:1 pool and a <= r0 this is <= 36 wei; the leftover is always
+    ///      worth only a handful of wei of the scarcer token.
+    function _dustTol(uint256 rS, uint256 rP, uint256 a, uint256 r0) internal pure returns (uint256) {
+        return (4 + 4 * (rS / rP) + 4 * (rP / rS)) * (2 + a / r0);
+    }
+
+    function _dustTol(uint256 rS, uint256 rP) internal pure returns (uint256) {
+        return _dustTol(rS, rP, 0, 1);
+    }
+
+    function _assertDust(uint256 leftS, uint256 leftP, uint256 rS, uint256 rP, uint256 a, uint256 r0) internal pure {
+        uint256 tol = _dustTol(rS, rP, a, r0);
+        assertLe(leftS, tol, "sUSDS leftover must be wei-level");
+        assertLe(leftP, tol, "phUSD leftover must be wei-level");
+    }
+
+    function _assertDust(uint256 leftS, uint256 leftP, uint256 rS, uint256 rP) internal pure {
+        _assertDust(leftS, leftP, rS, rP, 0, 1);
+    }
+
     function _reservesSP() internal view returns (uint256 rS, uint256 rP) {
         (uint112 r0, uint112 r1,) = pair.getReserves();
         (rS, rP) = pair.token0() == address(sUsds) ? (uint256(r0), uint256(r1)) : (uint256(r1), uint256(r0));
@@ -144,11 +171,11 @@ contract UniPoolerV2Test is Test {
 
     /// @dev Deploy a phUSD whose address sorts before/after sUSDS, for ordering coverage.
     function _deployPhusdOrdered(bool sUSDSFirst) internal returns (UPMockERC20 token) {
-        for (uint256 salt = 0; salt < 256; salt++) {
-            token = new UPMockERC20{salt: bytes32(salt)}("Phoenix USD", "phUSD", 18);
+        for (uint256 i = 0; i < 64; i++) {
+            token = new UPMockERC20("Phoenix USD", "phUSD", 18);
             if ((address(sUsds) < address(token)) == sUSDSFirst) return token;
         }
-        revert("no salt found");
+        revert("no ordering found");
     }
 
     // =========================================================================
@@ -419,7 +446,9 @@ contract UniPoolerV2Test is Test {
         _seedSUSDS(1_000e18);
         _quoteAndPool(400e18);
         // 600e18 remains (+ wei-level dust).
-        assertApproxEqAbs(sUsds.balanceOf(address(pooler)), 600e18, 2, "only sUSDSIn is consumed");
+        uint256 bal = sUsds.balanceOf(address(pooler));
+        assertGe(bal, 600e18, "never consumes more than sUSDSIn");
+        assertLe(bal - 600e18, _dustTol(1, 1), "only sUSDSIn is consumed (plus wei dust left behind)");
     }
 
     /// @dev The headline efficiency requirement: across reserve sizes, skewed prices and
@@ -449,10 +478,7 @@ contract UniPoolerV2Test is Test {
 
                 (uint256 leftS, uint256 leftP) = _leftoverValueInSUSDS(0);
                 (uint256 rS, uint256 rP) = _reservesSP();
-                // Wei-level: at most a couple of wei of sUSDS, and phUSD dust worth at most a
-                // couple of wei of sUSDS at the post-pool price (plus 1 wei rounding).
-                assertLe(leftS, 2, "sUSDS leftover must be wei-level");
-                assertLe((leftP * rS) / rP, 2, "phUSD leftover must be worth wei-level sUSDS");
+                _assertDust(leftS, leftP, rS, rP, a, reserves[i][0]);
                 vm.revertToState(snap);
             }
         }
@@ -473,8 +499,7 @@ contract UniPoolerV2Test is Test {
 
         (uint256 leftS, uint256 leftP) = _leftoverValueInSUSDS(0);
         (uint256 nS, uint256 nP) = _reservesSP();
-        assertLe(leftS, 2, "sUSDS dust");
-        assertLe((leftP * nS) / nP, 2, "phUSD dust");
+        _assertDust(leftS, leftP, nS, nP, a, rS);
     }
 
     /// @dev Contrast: the naive half-split leaves a large refund behind (what this story removes).
@@ -522,18 +547,22 @@ contract UniPoolerV2Test is Test {
         assertEq(phusd.balanceOf(address(pooler)), 0, "no phUSD stranded");
     }
 
-    function test_pool_frontRunSell_revertsOnMinLP() public {
+    /// @dev The opposite shift (phUSD dumped into the pair ahead of us) is favourable to the
+    ///      pooler — more phUSD per sUSDS and more LP per sUSDS — so it passes the quote's floors
+    ///      and still leaves only dust. Only the buy-side shift needs the floors.
+    function test_pool_frontRunSell_isFavourable_andStillDustOnly() public {
         _seedPair(10_000e18, 10_000e18);
         uint256 a = 1_000e18;
         _seedSUSDS(a);
-        (,, uint256 qLP) = pooler.quotePool(a);
+        (, uint256 qOut, uint256 qLP) = pooler.quotePool(a);
 
-        _frontRunSellPhusd(2_000e18); // phUSD dumped: our LP share per sUSDS changes
+        _frontRunSellPhusd(2_000e18);
 
         vm.prank(authorizedPooler);
-        vm.expectPartialRevert(UniPoolerV2.UniPoolerV2__InsufficientLP.selector);
-        pooler.pool(a, 1, qLP);
-        assertEq(sUsds.balanceOf(address(pooler)), a, "sUSDS untouched after revert");
+        pooler.pool(a, qOut, qLP);
+        assertGe(pair.balanceOf(address(pooler)), qLP, "LP at least the pre-shift quote");
+        (uint256 rS, uint256 rP) = _reservesSP();
+        _assertDust(sUsds.balanceOf(address(pooler)), phusd.balanceOf(address(pooler)), rS, rP);
     }
 
     /// @dev A front-run inside tolerance succeeds, and the on-chain `s` re-derivation still
@@ -550,8 +579,8 @@ contract UniPoolerV2Test is Test {
         pooler.pool(a, (qOut * 98) / 100, (qLP * 98) / 100);
 
         (uint256 leftS, uint256 leftP) = _leftoverValueInSUSDS(0);
-        assertLe(leftS, 2, "sUSDS dust only");
-        assertLe(leftP, 2, "phUSD dust only");
+        (uint256 rS, uint256 rP) = _reservesSP();
+        _assertDust(leftS, leftP, rS, rP);
         assertGt(pair.balanceOf(address(pooler)), 0, "LP received");
     }
 
@@ -580,8 +609,7 @@ contract UniPoolerV2Test is Test {
             vm.prank(authorizedPooler);
             up.pool(500e18, qOut, qLP);
             assertEq(p.balanceOf(address(up)), qLP, "quote exact in this ordering");
-            assertLe(sUsds.balanceOf(address(up)), 2, "sUSDS dust");
-            assertLe(ph.balanceOf(address(up)), 4, "phUSD dust");
+            _assertDust(sUsds.balanceOf(address(up)), ph.balanceOf(address(up)), 10_000, 20_000);
         }
     }
 
@@ -1448,7 +1476,7 @@ contract UniPoolerV2Test is Test {
 
         _quoteAndPool(900e18);
 
-        assertLe(sUsds.balanceOf(address(pooler)), 2, "all wrapped sUSDS pooled (dust only)");
+        assertLe(sUsds.balanceOf(address(pooler)), _dustTol(1, 1), "all wrapped sUSDS pooled (dust only)");
         assertGt(pair.balanceOf(address(pooler)), 0, "pooler holds LP");
         assertEq(usdc.balanceOf(address(streamer)), streamed, "pool() does not touch the donation");
         assertEq(usdc.balanceOf(address(pooler)), 0, "pool() moves no USDC");
