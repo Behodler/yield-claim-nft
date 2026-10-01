@@ -33,7 +33,9 @@ contract MockUniV2AmmPair is ERC20 {
         uint256 b0 = IERC20(token0).balanceOf(address(this));
         uint256 b1 = IERC20(token1).balanceOf(address(this));
         require(b0 <= type(uint112).max && b1 <= type(uint112).max, "UniswapV2: OVERFLOW");
+        // forge-lint: disable-next-line(unsafe-typecast)
         reserve0 = uint112(b0);
+        // forge-lint: disable-next-line(unsafe-typecast)
         reserve1 = uint112(b1);
     }
 
