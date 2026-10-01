@@ -96,7 +96,7 @@ contract PromotionUniV2_EthForkTest is Test {
 
     function setUp() public {
         // Fork mainnet. Prefer an archive RPC via env (accept either MAINNET_RPC_URL or the RPC_MAINNET
-        // name used by the local .envrc); fall back to a public node for head runs.
+        // name used by the local .envrc); with neither set, the suite is skipped.
         string memory rpc = vm.envOr("MAINNET_RPC_URL", vm.envOr("RPC_MAINNET", string("")));
         if (bytes(rpc).length == 0) {
             vm.skip(true); // no archive RPC configured: skip the whole suite cleanly
