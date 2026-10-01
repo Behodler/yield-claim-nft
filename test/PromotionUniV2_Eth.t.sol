@@ -6,6 +6,8 @@ import {Vm} from "forge-std/Vm.sol";
 import {PromotionUniV2_Eth} from "../src/dispatchers/PromotionUniV2_Eth.sol";
 import {IDispatchHook} from "../src/interfaces/IDispatchHook.sol";
 import {IUniswapV2Router02} from "../src/interfaces/uniswap/IUniswapV2Router02.sol";
+import {IUniswapV2Pair} from "../src/interfaces/uniswap/IUniswapV2Pair.sol";
+import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {NFTMinterV2} from "../src/NFTMinterV2.sol";
 import {GatherV2} from "../src/dispatchers/GatherV2.sol";
 import {MockDispatchHook} from "./mocks/MockDispatchHook.sol";
@@ -33,13 +35,18 @@ contract MockPromoToken is ERC20 {
 }
 
 /// @title PromotionUniV2_Eth — mainnet fork tests
-/// @notice The multi-protocol flow (SKY PSM + Balancer V3 + Uniswap V2 + native ETH) hardcodes live
-///         mainnet addresses and cannot be faithfully mocked, so these tests run against a mainnet
-///         fork. This is the repo's first fork test.
+/// @notice The multi-protocol flow (SKY PSM + Uniswap V2 + native ETH) hardcodes live mainnet
+///         addresses and cannot be faithfully mocked, so these tests run against a mainnet fork.
+///         This is the repo's first fork test.
 ///
-/// @dev RPC wiring: set `MAINNET_RPC_URL` to an ARCHIVE endpoint (Alchemy/Infura). `FORK_BLOCK`
-///      pins historical state that free full-nodes do not serve; a public node fallback is used
-///      only when the env var is unset (head-only). See foundry.toml `[rpc_endpoints]`.
+///         Leg A (story 049) swaps sUSDS→phUSD through the phUSD/sUSDS Uniswap V2 pair. That pair
+///         does not exist on mainnet at `FORK_BLOCK`, so `setUp` creates and seeds it via the real
+///         Router02 (which auto-creates it through the real factory).
+///
+/// @dev RPC wiring: set `MAINNET_RPC_URL` (or the `.envrc` name `RPC_MAINNET`) to an ARCHIVE
+///      endpoint (Alchemy/Infura) — `FORK_BLOCK` pins historical state that free full-nodes do not
+///      serve. With neither variable set the whole suite SKIPS (same convention as
+///      `UniPoolerV2.fork.t.sol`); there is no public-node fallback.
 contract PromotionUniV2_EthForkTest is Test {
     using SafeERC20 for IERC20;
 
@@ -50,14 +57,20 @@ contract PromotionUniV2_EthForkTest is Test {
     address internal constant WBTC = 0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599;
     address internal constant UNIV2_ROUTER = 0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D;
     address internal constant UNIV2_FACTORY = 0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f;
+    address internal constant sUSDS = 0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD;
 
-    /// @dev Recent mainnet block where phUSD/sUSDS pool, the SKY PSM, and the UniV2 router are all
+    /// @dev Recent mainnet block where phUSD, sUSDS, the SKY PSM, and the UniV2 router are all
     ///      live. Requires an archive RPC to fork at this height.
     uint256 internal constant FORK_BLOCK = 25_550_000;
 
     PromotionUniV2_Eth internal dispatcher;
     MockPromoToken internal promo;
     address internal phusdPromoPair;
+    /// @dev The phUSD/sUSDS UniV2 pair Leg A swaps through — created and seeded in `setUp`.
+    address internal phusdSusdsPair;
+
+    /// @dev Seed depth for the phUSD/sUSDS pair, in dollars per side (phUSD at $1 peg).
+    uint256 internal constant PHUSD_SUSDS_SEED = 1_000_000e18;
 
     address internal owner = address(this);
     address internal minter = address(0xBEEF);
@@ -84,9 +97,18 @@ contract PromotionUniV2_EthForkTest is Test {
     function setUp() public {
         // Fork mainnet. Prefer an archive RPC via env (accept either MAINNET_RPC_URL or the RPC_MAINNET
         // name used by the local .envrc); fall back to a public node for head runs.
-        string memory rpc =
-            vm.envOr("MAINNET_RPC_URL", vm.envOr("RPC_MAINNET", string("https://ethereum-rpc.publicnode.com")));
+        string memory rpc = vm.envOr("MAINNET_RPC_URL", vm.envOr("RPC_MAINNET", string("")));
+        if (bytes(rpc).length == 0) {
+            vm.skip(true); // no archive RPC configured: skip the whole suite cleanly
+            return;
+        }
         vm.createSelectFork(rpc, FORK_BLOCK);
+
+        // Leg A's venue: the phUSD/sUSDS UniV2 pair. Absent on mainnet at FORK_BLOCK — create it.
+        require(IUniswapV2Factory(UNIV2_FACTORY).getPair(sUSDS, phUSD) == address(0), "phUSD/sUSDS pair exists");
+        _seedPhusdSusdsPair(PHUSD_SUSDS_SEED);
+        phusdSusdsPair = IUniswapV2Factory(UNIV2_FACTORY).getPair(sUSDS, phUSD);
+        require(phusdSusdsPair != address(0), "phUSD/sUSDS pair not created");
 
         promo = new MockPromoToken();
 
@@ -151,6 +173,19 @@ contract PromotionUniV2_EthForkTest is Test {
         IUniswapV2Router02(UNIV2_ROUTER).addLiquidity(
             tokenA, tokenB, amtA, amtB, 0, 0, address(this), block.timestamp
         );
+    }
+
+    /// @dev Seeds the phUSD/sUSDS pair at the $1 phUSD peg: `dollars` phUSD against the sUSDS
+    ///      shares worth `dollars` USDS (sUSDS trades above $1, so fewer shares than phUSD).
+    function _seedPhusdSusdsPair(uint256 dollars) internal {
+        uint256 shares = IERC4626(sUSDS).convertToShares(dollars);
+        _seedPair(sUSDS, shares, phUSD, dollars);
+    }
+
+    /// @dev Returns the pair's (sUSDS, phUSD) reserves, order-normalised.
+    function _phusdSusdsReserves() internal view returns (uint256 rS, uint256 rP) {
+        (uint112 r0, uint112 r1,) = IUniswapV2Pair(phusdSusdsPair).getReserves();
+        (rS, rP) = IUniswapV2Pair(phusdSusdsPair).token0() == sUSDS ? (uint256(r0), uint256(r1)) : (uint256(r1), uint256(r0));
     }
 
     function _provide(address token, uint256 amount) internal {
@@ -565,7 +600,7 @@ contract PromotionUniV2_EthForkTest is Test {
         uint256 lpBefore = IERC20(phusdPromoPair).balanceOf(address(dispatcher));
 
         vm.prank(authorizedPooler);
-        dispatcher.pool(amount, 0, 0, 0, 0, 0);
+        dispatcher.pool(amount, 1, 0, 0, 0, 0);
 
         // USDC fully consumed across both legs.
         assertEq(IERC20(USDC).balanceOf(address(dispatcher)), 0, "USDC fully consumed");
@@ -579,56 +614,139 @@ contract PromotionUniV2_EthForkTest is Test {
     function test_pool_revertsWhenNothingToPool() public {
         vm.prank(authorizedPooler);
         vm.expectRevert("PromotionUniV2_Eth: nothing to pool");
-        dispatcher.pool(0, 0, 0, 0, 0, 0);
+        dispatcher.pool(0, 1, 0, 0, 0, 0);
     }
 
     function test_pool_revertsWhenAmountExceedsBalance() public {
         _seedPrime(1000e6);
         vm.prank(authorizedPooler);
         vm.expectRevert("PromotionUniV2_Eth: insufficient prime");
-        dispatcher.pool(1000e6 + 1, 0, 0, 0, 0, 0);
+        dispatcher.pool(1000e6 + 1, 1, 0, 0, 0, 0);
     }
 
     function test_pool_revertsForNonAuthorizedPooler() public {
         _seedPrime(1000e6);
         vm.prank(nonOwner);
         vm.expectRevert("PromotionUniV2_Eth: caller not authorized pooler");
-        dispatcher.pool(1000e6, 0, 0, 0, 0, 0);
+        dispatcher.pool(1000e6, 1, 0, 0, 0, 0);
     }
 
     function test_pool_revertsWhenMinPhusdOutNotMet() public {
         _seedPrime(5000e6);
         vm.prank(authorizedPooler);
-        vm.expectRevert(); // Balancer swap limitRaw floor unmet
+        vm.expectRevert("UniswapV2Router: INSUFFICIENT_OUTPUT_AMOUNT"); // Leg A V2 floor unmet
         dispatcher.pool(5000e6, type(uint256).max, 0, 0, 0, 0);
+    }
+
+    // =====================================================================
+    // Leg A — sUSDS→phUSD through the phUSD/sUSDS Uniswap V2 pair (story 049)
+    // =====================================================================
+
+    /// @dev A zero phUSD floor is an unbounded-slippage swap; it must revert loudly, before any
+    ///      USDC moves.
+    function test_pool_revertsOnZeroPhusdFloor() public {
+        _seedPrime(5000e6);
+        vm.prank(authorizedPooler);
+        vm.expectRevert("PromotionUniV2_Eth: zero phUSD floor");
+        dispatcher.pool(5000e6, 0, 0, 0, 0, 0);
+    }
+
+    /// @dev Leg A buys phUSD through the seeded V2 pair: the pair's sUSDS reserve rises by the
+    ///      shares paid in, its phUSD reserve falls by exactly the phUSD acquired, and that amount
+    ///      is the constant-product (0.3% fee) output for those shares on the pre-swap reserves.
+    function test_legA_swapsThroughPhusdSusdsV2Pair() public {
+        uint256 amount = 5000e6;
+        _seedPrime(amount);
+        (uint256 rS0, uint256 rP0) = _phusdSusdsReserves();
+        uint256 supplyBefore = IERC20(phUSD).totalSupply();
+
+        vm.recordLogs();
+        vm.prank(authorizedPooler);
+        dispatcher.pool(amount, 1, 0, 0, 0, 0);
+        (, uint256 phusdAcquired, uint256 phusdBurned,,) = _extractPooled(vm.getRecordedLogs());
+
+        (uint256 rS1, uint256 rP1) = _phusdSusdsReserves();
+        uint256 sharesIn = rS1 - rS0;
+        assertGt(sharesIn, 0, "sUSDS paid into the phUSD/sUSDS pair");
+        assertGt(phusdAcquired, 0, "phUSD received from Leg A");
+        assertEq(rP0 - rP1, phusdAcquired, "pair phUSD reserve fell by exactly the phUSD acquired");
+
+        uint256 inWithFee = sharesIn * 997;
+        uint256 expectedOut = (inWithFee * rP0) / (rS0 * 1000 + inWithFee);
+        assertEq(phusdAcquired, expectedOut, "Leg A output is the V2 quote on pre-swap reserves");
+
+        // ~$3000 of USDC at the $1 seed peg, minus PSM fee and V2 fee/impact on a $1M-deep pair.
+        assertGt(phusdAcquired, 2900e18, "Leg A acquired ~3000 phUSD");
+        assertLt(phusdAcquired, 3000e18, "Leg A cannot beat the peg");
+
+        // The sUSDS bought is fully spent on the swap; none is stranded on the dispatcher.
+        assertEq(IERC20(sUSDS).balanceOf(address(dispatcher)), 0, "no sUSDS stranded");
+        assertEq(supplyBefore - IERC20(phUSD).totalSupply(), phusdBurned, "half burned as before");
+    }
+
+    /// @dev `minPhusdOut` is honoured at the exact boundary: the precise V2 output passes, one wei
+    ///      more reverts with the router's own floor error.
+    function test_legA_minPhusdOutHonouredAtExactBoundary() public {
+        uint256 amount = 5000e6;
+        _seedPrime(amount);
+
+        uint256 snap = vm.snapshotState();
+        vm.recordLogs();
+        vm.prank(authorizedPooler);
+        dispatcher.pool(amount, 1, 0, 0, 0, 0);
+        (, uint256 phusdAcquired,,,) = _extractPooled(vm.getRecordedLogs());
+        vm.revertToState(snap);
+
+        uint256 snap2 = vm.snapshotState();
+        vm.prank(authorizedPooler);
+        vm.expectRevert("UniswapV2Router: INSUFFICIENT_OUTPUT_AMOUNT");
+        dispatcher.pool(amount, phusdAcquired + 1, 0, 0, 0, 0);
+        vm.revertToState(snap2);
+
+        vm.recordLogs();
+        vm.prank(authorizedPooler);
+        dispatcher.pool(amount, phusdAcquired, 0, 0, 0, 0);
+        (, uint256 again,,,) = _extractPooled(vm.getRecordedLogs());
+        assertEq(again, phusdAcquired, "exact floor accepted");
+    }
+
+    /// @dev Leg A no longer touches the Balancer V3 vault at all: nothing is ever approved to it
+    ///      and no sUSDS reaches it.
+    function test_legA_doesNotTouchBalancerVault() public {
+        address balancerVault = 0xbA1333333333a1BA1108E8412f11850A5C319bA9;
+        uint256 vaultSusdsBefore = IERC20(sUSDS).balanceOf(balancerVault);
+        _seedPrime(5000e6);
+        vm.prank(authorizedPooler);
+        dispatcher.pool(5000e6, 1, 0, 0, 0, 0);
+        assertEq(IERC20(sUSDS).balanceOf(balancerVault), vaultSusdsBefore, "no sUSDS sent to Balancer vault");
     }
 
     function test_pool_revertsWhenMinEthOutNotMet() public {
         _seedPrime(5000e6);
         vm.prank(authorizedPooler);
         vm.expectRevert(); // UniV2 USDC->ETH INSUFFICIENT_OUTPUT_AMOUNT
-        dispatcher.pool(5000e6, 0, type(uint256).max, 0, 0, 0);
+        dispatcher.pool(5000e6, 1, type(uint256).max, 0, 0, 0);
     }
 
     function test_pool_revertsWhenMinPromoOutNotMet() public {
         _seedPrime(5000e6);
         vm.prank(authorizedPooler);
         vm.expectRevert(); // UniV2 ETH->promo INSUFFICIENT_OUTPUT_AMOUNT
-        dispatcher.pool(5000e6, 0, 0, type(uint256).max, 0, 0);
+        dispatcher.pool(5000e6, 1, 0, type(uint256).max, 0, 0);
     }
 
     function test_pool_revertsWhenMinWbtcOutNotMet() public {
         _seedPrime(5000e6);
         vm.prank(authorizedPooler);
         vm.expectRevert(); // UniV2 USDC->WBTC INSUFFICIENT_OUTPUT_AMOUNT
-        dispatcher.pool(5000e6, 0, 0, 0, type(uint256).max, 0);
+        dispatcher.pool(5000e6, 1, 0, 0, type(uint256).max, 0);
     }
 
     function test_pool_revertsWhenMinLPNotMet() public {
         _seedPrime(5000e6);
         vm.prank(authorizedPooler);
         vm.expectRevert("PromotionUniV2_Eth: insufficient LP");
-        dispatcher.pool(5000e6, 0, 0, 0, 0, type(uint256).max);
+        dispatcher.pool(5000e6, 1, 0, 0, 0, type(uint256).max);
     }
 
     function test_pool_revertsWhenPaused() public {
@@ -637,7 +755,7 @@ contract PromotionUniV2_EthForkTest is Test {
         dispatcher.pause();
         vm.prank(authorizedPooler);
         vm.expectRevert(abi.encodeWithSignature("EnforcedPause()"));
-        dispatcher.pool(5000e6, 0, 0, 0, 0, 0);
+        dispatcher.pool(5000e6, 1, 0, 0, 0, 0);
     }
 
     function test_pool_doesNotInvokeHook() public {
@@ -647,7 +765,7 @@ contract PromotionUniV2_EthForkTest is Test {
         assertEq(hook.callCount(), 1, "dispatch invoked hook once");
 
         vm.prank(authorizedPooler);
-        dispatcher.pool(5000e6, 0, 0, 0, 0, 0);
+        dispatcher.pool(5000e6, 1, 0, 0, 0, 0);
         assertEq(hook.callCount(), 1, "pool() must not invoke the dispatch hook");
     }
 
@@ -669,7 +787,7 @@ contract PromotionUniV2_EthForkTest is Test {
         _seedPrime(1000e6);
         vm.prank(p);
         vm.expectRevert("PromotionUniV2_Eth: caller not authorized pooler");
-        dispatcher.pool(1000e6, 0, 0, 0, 0, 0);
+        dispatcher.pool(1000e6, 1, 0, 0, 0, 0);
     }
 
     function test_incrementAuthVersion_massRevoke() public {
@@ -679,7 +797,7 @@ contract PromotionUniV2_EthForkTest is Test {
         _seedPrime(1000e6);
         vm.prank(authorizedPooler);
         vm.expectRevert("PromotionUniV2_Eth: caller not authorized pooler");
-        dispatcher.pool(1000e6, 0, 0, 0, 0, 0);
+        dispatcher.pool(1000e6, 1, 0, 0, 0, 0);
 
         // Re-authorize at the new version works.
         dispatcher.setAuthorizedPooler(authorizedPooler, true);
@@ -706,7 +824,7 @@ contract PromotionUniV2_EthForkTest is Test {
     function test_rescueERC20_withdrawsLPWhilePaused() public {
         _seedPrime(5000e6);
         vm.prank(authorizedPooler);
-        dispatcher.pool(5000e6, 0, 0, 0, 0, 0);
+        dispatcher.pool(5000e6, 1, 0, 0, 0, 0);
         uint256 lp = IERC20(phusdPromoPair).balanceOf(address(dispatcher));
         assertGt(lp, 0, "dispatcher holds LP");
 
@@ -852,7 +970,7 @@ contract PromotionUniV2_EthForkTest is Test {
 
         vm.recordLogs();
         vm.prank(authorizedPooler);
-        dispatcher.pool(amount, 0, 0, 0, 0, 0);
+        dispatcher.pool(amount, 1, 0, 0, 0, 0);
         Vm.Log[] memory logs = vm.getRecordedLogs();
 
         (
@@ -891,7 +1009,7 @@ contract PromotionUniV2_EthForkTest is Test {
         uint256 lpBefore = IERC20(phusdPromoPair).balanceOf(address(dispatcher));
 
         vm.prank(authorizedPooler);
-        dispatcher.pool(amount, 0, 0, 0, 1, 0);
+        dispatcher.pool(amount, 1, 0, 0, 1, 0);
 
         // The phUSD/promotion LP minted, and WBTC stayed resident (never routed into the pair).
         assertGt(IERC20(phusdPromoPair).balanceOf(address(dispatcher)), lpBefore, "LP minted");
@@ -910,7 +1028,7 @@ contract PromotionUniV2_EthForkTest is Test {
 
         vm.recordLogs();
         vm.prank(authorizedPooler);
-        dispatcher.pool(amount, 0, 0, 0, 0, 0);
+        dispatcher.pool(amount, 1, 0, 0, 0, 0);
         Vm.Log[] memory logs = vm.getRecordedLogs();
         (,,, uint256 wbtcAcquired,) = _extractPooled(logs);
 
