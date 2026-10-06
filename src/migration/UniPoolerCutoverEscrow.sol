@@ -91,6 +91,29 @@ contract UniPoolerCutoverEscrow is ReentrancyGuard {
     /// @notice The maximum distance of `deadline` into the future, mirroring the cutover core.
     uint256 public constant MAX_DEADLINE_WINDOW = 1 days;
 
+    // forge-lint: disable-next-line(screaming-snake-case-immutable)
+    address private immutable _operator;
+    // forge-lint: disable-next-line(screaming-snake-case-immutable)
+    address private immutable _newPooler;
+    // forge-lint: disable-next-line(screaming-snake-case-immutable)
+    address private immutable _oldPooler;
+    // forge-lint: disable-next-line(screaming-snake-case-immutable)
+    address private immutable _v3Router;
+    // forge-lint: disable-next-line(screaming-snake-case-immutable)
+    address private immutable _bpt;
+    // forge-lint: disable-next-line(screaming-snake-case-immutable)
+    address private immutable _usds;
+    // forge-lint: disable-next-line(screaming-snake-case-immutable)
+    address private immutable _sUSDS;
+    // forge-lint: disable-next-line(screaming-snake-case-immutable)
+    address private immutable _phUSD;
+    // forge-lint: disable-next-line(screaming-snake-case-immutable)
+    address private immutable _pair;
+    // forge-lint: disable-next-line(screaming-snake-case-immutable)
+    address private immutable _uniRouter;
+    // forge-lint: disable-next-line(screaming-snake-case-immutable)
+    bool private immutable _sUSDSIsToken0;
+
     /// @notice Emitted once the BPT has been exited and the pair seeded.
     /// @param bptIn The BPT exited (the escrow's whole BPT balance).
     /// @param sUSDSSeeded The sUSDS added to the pair (the escrow's whole sUSDS balance).
@@ -149,58 +172,254 @@ contract UniPoolerCutoverEscrow is ReentrancyGuard {
     /// @notice The escrow holds no USDS to wrap.
     error UniPoolerCutoverEscrow__NoUSDS();
 
-    /// @dev RED PHASE STUB (story 052): the surface compiles so the tests can run and fail.
-    constructor(address, address, address, address) {}
-
-    function exitAndSeed(ExitMode, uint256[] calldata, uint256) external returns (uint256) {
-        revert("UniPoolerCutoverEscrow: not implemented");
+    /// @notice Restricts a function to the immutable `operator`.
+    modifier onlyOperator() {
+        if (msg.sender != _operator) revert UniPoolerCutoverEscrow__NotOperator(msg.sender);
+        _;
     }
 
-    function wrapUsds() external returns (uint256) {
-        revert("UniPoolerCutoverEscrow: not implemented");
+    /// @param operator_ The only address allowed to call the state-changing functions (the cutover
+    ///        sender; mainnet `0xCad1a7864a108DBFF67F4b8af71fAB0C7A86D0B6`).
+    /// @param newPooler_ The UniPoolerV2 to seed; its `pair()`, `router()`, `sUSDS()` and `phUSD()`
+    ///        are read and fixed here.
+    /// @param oldPooler_ The old pooler (mainnet `0x7f6874332c4629429d70D15f685A8230323F11F1`);
+    ///        its `pool()` (snapshotted, since it is mutable there) and `primeToken()` are read here.
+    /// @param v3Router_ The Balancer V3 Router (mainnet `0x5C6fb490BDFD3246EB0bB062c168DeCAF4bD9FDd`),
+    ///        passed in because the old pooler keeps its router private.
+    constructor(address operator_, address newPooler_, address oldPooler_, address v3Router_) {
+        require(operator_ != address(0), "UniPoolerCutoverEscrow: zero operator");
+        require(newPooler_ != address(0), "UniPoolerCutoverEscrow: zero newPooler");
+        require(oldPooler_ != address(0), "UniPoolerCutoverEscrow: zero oldPooler");
+        require(v3Router_ != address(0), "UniPoolerCutoverEscrow: zero v3Router");
+
+        address pair_ = ICutoverNewPooler(newPooler_).pair();
+        address uniRouter_ = ICutoverNewPooler(newPooler_).router();
+        address sUSDS_ = ICutoverNewPooler(newPooler_).sUSDS();
+        address phUSD_ = ICutoverNewPooler(newPooler_).phUSD();
+        address bpt_ = ICutoverOldPooler(oldPooler_).pool();
+        address usds_ = ICutoverOldPooler(oldPooler_).primeToken();
+        require(pair_ != address(0), "UniPoolerCutoverEscrow: zero pair");
+        require(uniRouter_ != address(0), "UniPoolerCutoverEscrow: zero router");
+        require(sUSDS_ != address(0), "UniPoolerCutoverEscrow: zero sUSDS");
+        require(phUSD_ != address(0), "UniPoolerCutoverEscrow: zero phUSD");
+        require(bpt_ != address(0), "UniPoolerCutoverEscrow: zero pool");
+        require(usds_ != address(0), "UniPoolerCutoverEscrow: zero USDS");
+
+        address oldSUSDS = ICutoverOldPooler(oldPooler_).sUSDS();
+        if (oldSUSDS != sUSDS_) revert UniPoolerCutoverEscrow__SUSDSMismatch(oldSUSDS, sUSDS_);
+        address asset = IERC4626(sUSDS_).asset();
+        if (asset != usds_) revert UniPoolerCutoverEscrow__UsdsMismatch(usds_, asset);
+
+        _operator = operator_;
+        _newPooler = newPooler_;
+        _oldPooler = oldPooler_;
+        _v3Router = v3Router_;
+        _bpt = bpt_;
+        _usds = usds_;
+        _sUSDS = sUSDS_;
+        _phUSD = phUSD_;
+        _pair = pair_;
+        _uniRouter = uniRouter_;
+        _sUSDSIsToken0 = IUniswapV2Pair(pair_).token0() == sUSDS_;
     }
 
-    function abort() external {
-        revert("UniPoolerCutoverEscrow: not implemented");
+    // ─────────────────────────────── Operator actions ───────────────────────────────
+
+    /// @notice Exits the escrow's whole BPT balance through the V3 Router and seeds the new
+    ///         pooler's empty pair with the escrow's whole sUSDS and phUSD balances, minting the LP
+    ///         to `newPooler`. Atomic: any failed check reverts everything.
+    /// @dev Steps: (1) require an empty pair, skimming an unsynced donation to `newPooler` first;
+    ///      (2) require BPT > 0; (3) validate `minAmountsOut` and `deadline`; (4) exact-approve the
+    ///      V3 Router (it burns the BPT by spending ITS allowance), exit, reset the approval;
+    ///      (5) exact-approve Router02 and `addLiquidity` with mins == desired (an empty pair
+    ///      consumes the desired amounts exactly), then verify the LP and reserves; (6) require the
+    ///      escrow holds no BPT, sUSDS or phUSD.
+    /// @param mode `PROPORTIONAL` or `RECOVERY` (see `ExitMode`).
+    /// @param minAmountsOut Per-token exit floors in Balancer pool-token order; two entries, all
+    ///        non-zero.
+    /// @param deadline Router02 deadline; must lie in `(block.timestamp, block.timestamp + 1 days]`.
+    /// @return liquidity The LP minted to `newPooler`.
+    function exitAndSeed(ExitMode mode, uint256[] calldata minAmountsOut, uint256 deadline)
+        external
+        onlyOperator
+        nonReentrant
+        returns (uint256 liquidity)
+    {
+        // 1. The pair must be empty.
+        _requireEmptyPair();
+
+        // 2. BPT in: the escrow's whole balance.
+        uint256 bptIn = IERC20(_bpt).balanceOf(address(this));
+        if (bptIn == 0) revert UniPoolerCutoverEscrow__NoBPT();
+
+        // 3. Argument checks.
+        if (minAmountsOut.length != 2) revert UniPoolerCutoverEscrow__BadMinAmountsLength(minAmountsOut.length);
+        for (uint256 i = 0; i < 2; i++) {
+            if (minAmountsOut[i] == 0) revert UniPoolerCutoverEscrow__ZeroMinAmountOut(i);
+        }
+        if (deadline <= block.timestamp || deadline > block.timestamp + MAX_DEADLINE_WINDOW) {
+            revert UniPoolerCutoverEscrow__BadDeadline(deadline, block.timestamp);
+        }
+
+        // 4. Exit.
+        _exit(mode, bptIn, minAmountsOut);
+
+        // 5. Seed with the whole balances.
+        uint256 s = IERC20(_sUSDS).balanceOf(address(this));
+        uint256 p = IERC20(_phUSD).balanceOf(address(this));
+        liquidity = _seed(s, p, deadline);
+
+        // 6. Post-conditions.
+        _requireNoBalance(_bpt);
+        _requireNoBalance(_sUSDS);
+        _requireNoBalance(_phUSD);
+
+        emit Seeded(bptIn, s, p, liquidity, mode);
     }
 
-    function operator() external pure returns (address) {
-        return address(0);
+    /// @notice Wraps the escrow's whole USDS balance into sUSDS, crediting the shares to
+    ///         `newPooler`. Used for the old pooler's parked USDS.
+    /// @return shares The sUSDS shares minted to `newPooler`.
+    function wrapUsds() external onlyOperator nonReentrant returns (uint256 shares) {
+        uint256 amt = IERC20(_usds).balanceOf(address(this));
+        if (amt == 0) revert UniPoolerCutoverEscrow__NoUSDS();
+        IERC20(_usds).forceApprove(_sUSDS, amt);
+        shares = IERC4626(_sUSDS).deposit(amt, _newPooler);
+        IERC20(_usds).forceApprove(_sUSDS, 0);
+        _requireNoBalance(_usds);
+        emit UsdsWrapped(amt, shares);
     }
 
-    function newPooler() external pure returns (address) {
-        return address(0);
+    /// @notice Returns the escrow's whole BPT, sUSDS, phUSD and USDS balances to `oldPooler`, the
+    ///         only abort destination. All four are recoverable there by the old pooler's owner.
+    function abort() external onlyOperator nonReentrant {
+        uint256 b = _returnAll(_bpt);
+        uint256 s = _returnAll(_sUSDS);
+        uint256 p = _returnAll(_phUSD);
+        uint256 u = _returnAll(_usds);
+        emit Aborted(_oldPooler, b, s, p, u);
     }
 
-    function oldPooler() external pure returns (address) {
-        return address(0);
+    // ─────────────────────────────── Views ───────────────────────────────
+
+    /// @notice The only address allowed to call `exitAndSeed`, `wrapUsds` and `abort`.
+    function operator() external view returns (address) {
+        return _operator;
     }
 
-    function v3Router() external pure returns (address) {
-        return address(0);
+    /// @notice The UniPoolerV2 that receives the LP, the skim and the wrapped sUSDS.
+    function newPooler() external view returns (address) {
+        return _newPooler;
     }
 
-    function bpt() external pure returns (address) {
-        return address(0);
+    /// @notice The old pooler: the only `abort` destination.
+    function oldPooler() external view returns (address) {
+        return _oldPooler;
     }
 
-    function usds() external pure returns (address) {
-        return address(0);
+    /// @notice The Balancer V3 Router used for the exit.
+    function v3Router() external view returns (address) {
+        return _v3Router;
     }
 
-    function sUSDS() external pure returns (address) {
-        return address(0);
+    /// @notice The BPT, snapshotted from the old pooler's `pool()` at construction.
+    function bpt() external view returns (address) {
+        return _bpt;
     }
 
-    function phUSD() external pure returns (address) {
-        return address(0);
+    /// @notice USDS: the old pooler's prime token and `sUSDS.asset()`.
+    function usds() external view returns (address) {
+        return _usds;
     }
 
-    function pair() external pure returns (address) {
-        return address(0);
+    /// @notice sUSDS, shared by both poolers.
+    function sUSDS() external view returns (address) {
+        return _sUSDS;
     }
 
-    function uniRouter() external pure returns (address) {
-        return address(0);
+    /// @notice phUSD.
+    function phUSD() external view returns (address) {
+        return _phUSD;
+    }
+
+    /// @notice The new pooler's sUSDS/phUSD Uniswap V2 pair.
+    function pair() external view returns (address) {
+        return _pair;
+    }
+
+    /// @notice The new pooler's Uniswap V2 Router02.
+    function uniRouter() external view returns (address) {
+        return _uniRouter;
+    }
+
+    // ─────────────────────────────── Internals ───────────────────────────────
+
+    /// @dev Skims an unsynced donation on a reserve-less pair to `newPooler`, then requires zero
+    ///      reserves and zero token balances. A synced donation therefore reverts (DoS only).
+    function _requireEmptyPair() internal {
+        (uint112 r0, uint112 r1,) = IUniswapV2Pair(_pair).getReserves();
+        address t0 = IUniswapV2Pair(_pair).token0();
+        address t1 = IUniswapV2Pair(_pair).token1();
+        uint256 b0 = IERC20(t0).balanceOf(_pair);
+        uint256 b1 = IERC20(t1).balanceOf(_pair);
+        if (r0 == 0 && r1 == 0 && (b0 != 0 || b1 != 0)) {
+            ICutoverPairSkim(_pair).skim(_newPooler);
+            emit PairSkimmed(_newPooler, b0, b1);
+            (r0, r1,) = IUniswapV2Pair(_pair).getReserves();
+            b0 = IERC20(t0).balanceOf(_pair);
+            b1 = IERC20(t1).balanceOf(_pair);
+        }
+        if (r0 != 0 || r1 != 0 || b0 != 0 || b1 != 0) {
+            revert UniPoolerCutoverEscrow__PairNotEmpty(r0, r1, b0, b1);
+        }
+    }
+
+    /// @dev Exact-approves the V3 Router for `bptIn`, exits by `mode`, resets the approval and
+    ///      requires every BPT to be gone.
+    function _exit(ExitMode mode, uint256 bptIn, uint256[] calldata minAmountsOut) internal {
+        IERC20(_bpt).forceApprove(_v3Router, bptIn);
+        if (mode == ExitMode.PROPORTIONAL) {
+            IV3RouterExit(_v3Router).removeLiquidityProportional(_bpt, bptIn, minAmountsOut, false, "");
+        } else {
+            IV3RouterExit(_v3Router).removeLiquidityRecovery(_bpt, bptIn, minAmountsOut);
+        }
+        IERC20(_bpt).forceApprove(_v3Router, 0);
+        uint256 remaining = IERC20(_bpt).balanceOf(address(this));
+        if (remaining != 0) revert UniPoolerCutoverEscrow__BPTRemaining(remaining);
+    }
+
+    /// @dev Adds `s` sUSDS and `p` phUSD to the empty pair via Router02 (mins == desired), LP to
+    ///      `newPooler`, and verifies exact consumption, the LP credit and the resulting reserves.
+    function _seed(uint256 s, uint256 p, uint256 deadline) internal returns (uint256 liquidity) {
+        if (s == 0 || p == 0) revert UniPoolerCutoverEscrow__NothingToSeed(s, p);
+        uint256 lpBefore = IERC20(_pair).balanceOf(_newPooler);
+
+        IERC20(_sUSDS).forceApprove(_uniRouter, s);
+        IERC20(_phUSD).forceApprove(_uniRouter, p);
+        (uint256 a, uint256 b, uint256 liq) =
+            IUniswapV2Router02(_uniRouter).addLiquidity(_sUSDS, _phUSD, s, p, s, p, _newPooler, deadline);
+        IERC20(_sUSDS).forceApprove(_uniRouter, 0);
+        IERC20(_phUSD).forceApprove(_uniRouter, 0);
+
+        if (a != s || b != p) revert UniPoolerCutoverEscrow__SeedNotExact(a, b);
+        uint256 lpReceived = IERC20(_pair).balanceOf(_newPooler) - lpBefore;
+        if (liq == 0 || lpReceived != liq) revert UniPoolerCutoverEscrow__LPNotMinted(liq, lpReceived);
+
+        (uint112 r0, uint112 r1,) = IUniswapV2Pair(_pair).getReserves();
+        (uint256 rS, uint256 rP) = _sUSDSIsToken0 ? (uint256(r0), uint256(r1)) : (uint256(r1), uint256(r0));
+        if (rS != s || rP != p) revert UniPoolerCutoverEscrow__ReserveMismatch(rS, rP);
+        liquidity = liq;
+    }
+
+    /// @dev Transfers the escrow's whole `token` balance to `oldPooler`; returns the amount.
+    function _returnAll(address token) internal returns (uint256 amount) {
+        amount = IERC20(token).balanceOf(address(this));
+        if (amount != 0) IERC20(token).safeTransfer(_oldPooler, amount);
+    }
+
+    /// @dev Reverts if the escrow still holds any `token`.
+    function _requireNoBalance(address token) internal view {
+        uint256 remaining = IERC20(token).balanceOf(address(this));
+        if (remaining != 0) revert UniPoolerCutoverEscrow__BalanceRemaining(token, remaining);
     }
 }

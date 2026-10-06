@@ -219,7 +219,7 @@ contract UniPoolerCutoverEscrowForkTest is Test {
         uint256 bal = _withdrawAllToEscrow();
         uint256[] memory mins = _mins(_share(bal));
         vm.prank(OWNER_EOA);
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSignature("PoolPaused(address)", BPT));
         escrow.exitAndSeed(UniPoolerCutoverEscrow.ExitMode.PROPORTIONAL, mins, block.timestamp + 1 hours);
 
         // Return the BPT to the old pooler (abort) and re-run from scratch through recovery, so
