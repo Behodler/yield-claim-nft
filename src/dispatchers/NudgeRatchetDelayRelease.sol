@@ -111,7 +111,7 @@ contract NudgeRatchetDelayRelease is ATokenDispatcherV2 {
     }
 
     /// @notice Owner escape hatch to recover ERC20s held by this contract. Mirrors
-    ///         BalancerPoolerV2/Uniboost. NOT pause-gated, by design.
+    ///         UniPoolerV2/Uniboost. NOT pause-gated, by design.
     /// @dev NOTE: this CAN withdraw held `_token` (USDC), which is backing for already-accrued
     ///      mint-debt. Using it on `_token` can leave debt under-backed and is an owner
     ///      responsibility; intended use is recovering non-`_token` assets sent here by mistake.
