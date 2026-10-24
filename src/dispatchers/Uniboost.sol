@@ -13,9 +13,9 @@ import {INudgeStreamer} from "phoenix-nft-staking/INudgeStreamer.sol";
 /// @notice A V2 token dispatcher that boosts the price and liquidity of a target Uniswap V2
 ///         pool via the classic "buy-and-pool" zap, plus an optional prime-token donation split.
 /// @dev Structurally a blend of `GatherV2` (tokens already on the contract via the minter's
-///      `transferFrom`; owner-settable recipient) and `BalancerPoolerV2` (two-phase split:
+///      `transferFrom`; owner-settable recipient) and `UniPoolerV2` (two-phase split:
 ///      `_dispatch` carves the donation and retains the rest; a separate authorized-pooler-gated
-///      `pool(...)` later performs the boost). Unlike `BalancerPoolerV2`, the prime token here
+///      `pool(...)` later performs the boost). Unlike `UniPoolerV2`, the prime token here
 ///      IS the donation token, so the donation needs no PSM and no swap — it is simply approved
 ///      to the `NudgeStreamer` and pulled by `collectNudge`.
 ///
@@ -79,7 +79,7 @@ contract Uniboost is ATokenDispatcherV2 {
     ///         dispatch. Defaults to 0 (donation disabled).
     uint256 public donationSplit;
 
-    /// @notice Recipient of the donated prime token (intended: the BalancerPooler batch-minter).
+    /// @notice Recipient of the donated prime token (intended: the nudge batch-minter).
     ///         address(0) disables the donation even if donationSplit > 0.
     address public recipient;
 
@@ -225,7 +225,7 @@ contract Uniboost is ATokenDispatcherV2 {
     ///      branch requires a configured `nudgeStreamer`. The base then
     ///      calls `hook.onDispatch(minter, amount)` with the gross amount, so mint-debt accrues on
     ///      the full dispatched prime regardless of the donation (same convention as
-    ///      `BalancerPoolerV2`). MUST NOT re-declare base modifiers.
+    ///      `UniPoolerV2`). MUST NOT re-declare base modifiers.
     /// @param amount The FOT-adjusted amount of prime token to dispatch.
     function _dispatch(
         address,

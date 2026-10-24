@@ -9,12 +9,14 @@ import {NFTMinterV2} from "../../src/NFTMinterV2.sol";
 import {NudgeRatchet} from "../../src/dispatchers/NudgeRatchet.sol";
 import {Uniboost} from "../../src/dispatchers/Uniboost.sol";
 import {GatherV2} from "../../src/dispatchers/GatherV2.sol";
-import {BalancerPoolerV2} from "../../src/dispatchers/BalancerPoolerV2.sol";
+import {UniPoolerV2} from "../../src/dispatchers/UniPoolerV2.sol";
 import {NudgeRatchetMintDebtHook} from "../../src/hooks/NudgeRatchetMintDebtHook.sol";
 import {IDispatchHook} from "../../src/interfaces/IDispatchHook.sol";
 import {MockMintable} from "../mocks/MockMintable.sol";
 import {MockERC4626} from "../mocks/MockERC4626.sol";
 import {MockSkyPSM} from "../mocks/MockSkyPSM.sol";
+import {MockDispatchHook} from "../mocks/MockDispatchHook.sol";
+import {MockUniV2AmmPair, MockUniV2AmmRouter} from "../mocks/MockUniV2Amm.sol";
 
 import {NudgeStreamer} from "phoenix-nft-staking/NudgeStreamer.sol";
 import {BatchNFTMinterMultiToken} from "phoenix-nft-staking/BatchNFTMinterMultiToken.sol";
@@ -45,7 +47,7 @@ contract MockPayToken is ERC20 {
     }
 }
 
-/// @dev 18-decimal USDS stand-in — the prime token `BalancerPoolerV2` dispatches. Its donation
+/// @dev 18-decimal USDS stand-in — the prime token `UniPoolerV2` dispatches. Its donation
 ///      slice is converted to 6-dp USDC through the Sky PSM before it ever reaches the streamer.
 contract MockUSDS18 is ERC20 {
     constructor() ERC20("Sky USD", "USDS") {}
@@ -70,13 +72,16 @@ contract MockUniV2PairStub {
 /// @title NudgeStreamerDonorIntegration
 /// @notice End-to-end integration of the story-046 / story-047 donors against the REAL nudge
 ///         stack: a real `NudgeStreamer`, a real `BatchNFTMinterMultiToken`, a real
-///         `NFTMinterV2` and the real `NudgeRatchet` / `Uniboost` / `BalancerPoolerV2`
-///         dispatchers.
+///         `NFTMinterV2` and the real `NudgeRatchet` / `Uniboost` / `UniPoolerV2`
+///         dispatchers. (The third donor was `BalancerPoolerV2` until the Balancer wind-down
+///         retired it; story 050 retargeted it to its index-4 replacement, `UniPoolerV2`, which
+///         carries the identical PSM -> streamer donation path.)
 ///
 /// @dev There is deliberately **no `MockNudgeDonor`** here — the production dispatchers are
 ///      the donors, which is the whole point of the story. The only mocks are the ERC20s, a
 ///      UniV2 pair stub that `Uniboost`'s constructor validates against, and (for
-///      `BalancerPoolerV2`) an ERC4626 sUSDS stand-in plus `MockSkyPSM` — the Sky PSM is an
+///      `UniPoolerV2`) an ERC4626 sUSDS stand-in, a UniV2 pair/router whose factory registers
+///      the pair as canonical, a recording dispatch hook, plus `MockSkyPSM` — the Sky PSM is an
 ///      external protocol, so a faithful mock is the only option off-fork. The streamer and
 ///      batch-minter are real in every case.
 ///
@@ -97,7 +102,7 @@ contract NudgeStreamerDonorIntegrationTest is Test {
     NFTMinterV2 internal nftMinter;
     NudgeRatchet internal ratchet;
     Uniboost internal uniboost;
-    BalancerPoolerV2 internal balancerPooler;
+    UniPoolerV2 internal uniPooler;
     GatherV2 internal payDispatcher;
     NudgeRatchetMintDebtHook internal ratchetHook;
 
@@ -110,6 +115,10 @@ contract NudgeStreamerDonorIntegrationTest is Test {
     MockUSDS18 internal usds;
     MockERC4626 internal sUsds;
     MockSkyPSM internal psm;
+    MockUSDS18 internal poolerPhUSD;
+    MockUniV2AmmPair internal poolerPair;
+    MockUniV2AmmRouter internal poolerRouter;
+    MockDispatchHook internal poolerHook;
 
     address internal owner = address(this);
     address internal batcher = address(0xBA7C);
@@ -123,18 +132,11 @@ contract NudgeStreamerDonorIntegrationTest is Test {
     uint256 internal constant STREAM_DURATION = 1000;
     uint256 internal constant MINT_PRICE = 1e18;
 
-    /// @dev `BalancerPoolerV2`'s Balancer wiring is never exercised here — `pool()` is a
-    ///      separate owner-triggered action and this suite only drives `_dispatch`. Non-zero
-    ///      stubs satisfy the constructor's zero-address guards.
-    address internal constant BALANCER_POOL_STUB = address(0xB901);
-    address internal constant BALANCER_VAULT_STUB = address(0xB902);
-    address internal constant BALANCER_ROUTER_STUB = address(0xB903);
-
     /// @dev Percentage of each dispatched USDS the pooler diverts to the nudge donation.
-    uint256 internal constant BALANCER_DONATION_PCT = 10;
+    uint256 internal constant POOLER_DONATION_PCT = 10;
     /// @dev USDS mint price on the pooler's dispatcher index (18dp).
-    uint256 internal constant BALANCER_MINT_PRICE = 1000e18;
-    uint256 internal constant BALANCER_INDEX = 3;
+    uint256 internal constant POOLER_MINT_PRICE = 1000e18;
+    uint256 internal constant POOLER_INDEX = 3;
 
     function setUp() public {
         usdc = new MockUSDC6();
@@ -156,7 +158,8 @@ contract NudgeStreamerDonorIntegrationTest is Test {
         uniboost = new Uniboost(address(usdc), ROUTER_STUB, address(uniPool), address(boostTarget), owner);
         uniboost.setMinter(address(nftMinter));
 
-        // ---- the third donor: BalancerPoolerV2 (story 047) ----
+        // ---- the third donor: UniPoolerV2 (story 047's donation path; retargeted from the
+        //      retired BalancerPoolerV2 in story 050) ----
         // It dispatches 18-dp USDS, wraps the pooling slice into sUSDS and converts the
         // donation slice to 6-dp USDC through the Sky PSM. Only the USDC leg touches the
         // streamer, so the same (batch, USDC) stream serves all three donors.
@@ -166,12 +169,26 @@ contract NudgeStreamerDonorIntegrationTest is Test {
         usdc.approve(address(psm), type(uint256).max);
         psm.fundReserve(1_000_000e6);
 
-        balancerPooler = new BalancerPoolerV2(
-            address(sUsds), BALANCER_POOL_STUB, BALANCER_VAULT_STUB, BALANCER_ROUTER_STUB, true, owner
+        // The pair is created first and registered as canonical in the router's factory (the
+        // mock router's constructor does this), so UniPoolerV2's canonical-pair check passes.
+        // `pool()` is never called here, so the pair stays unseeded.
+        poolerPhUSD = new MockUSDS18();
+        poolerPair = new MockUniV2AmmPair(address(sUsds), address(poolerPhUSD));
+        poolerRouter = new MockUniV2AmmRouter(poolerPair);
+        assertEq(
+            poolerRouter.factory().getPair(address(sUsds), address(poolerPhUSD)),
+            address(poolerPair),
+            "pair must be canonical before the pooler is constructed"
         );
-        balancerPooler.setMinter(address(nftMinter));
-        balancerPooler.setPSM(address(psm));
-        balancerPooler.setBatchDonationSize(BALANCER_DONATION_PCT);
+        uniPooler = new UniPoolerV2(
+            address(sUsds), address(poolerPhUSD), address(poolerRouter), address(poolerPair), owner
+        );
+        // UniPoolerV2 refuses to dispatch while `hook` is still the constructor's default.
+        poolerHook = new MockDispatchHook();
+        uniPooler.setHook(IDispatchHook(address(poolerHook)));
+        uniPooler.setMinter(address(nftMinter));
+        uniPooler.setPSM(address(psm));
+        uniPooler.setBatchDonationSize(POOLER_DONATION_PCT);
 
         // ---- the batch-minter's own (non-USDC) mint path ----
         payDispatcher = new GatherV2(address(payToken), treasury, owner);
@@ -181,7 +198,7 @@ contract NudgeStreamerDonorIntegrationTest is Test {
         // the pay path lands on the non-trivial DISPATCHER_INDEX the reference suite uses.
         nftMinter.registerDispatcher(address(ratchet), 10e6, 0); // index 1
         nftMinter.registerDispatcher(address(uniboost), 10e6, 0); // index 2
-        nftMinter.registerDispatcher(address(balancerPooler), BALANCER_MINT_PRICE, 0); // index 3
+        nftMinter.registerDispatcher(address(uniPooler), POOLER_MINT_PRICE, 0); // index 3
         for (uint256 i = 4; i < DISPATCHER_INDEX; ++i) {
             nftMinter.registerDispatcher(address(uint160(0x1000 + i)), 1, 0);
         }
@@ -206,8 +223,8 @@ contract NudgeStreamerDonorIntegrationTest is Test {
         uniboost.setNudgeStreamer(address(streamer));
         uniboost.setRecipient(address(batch));
         uniboost.setDonationSplit(50);
-        balancerPooler.setNudgeStreamer(address(streamer));
-        balancerPooler.setBatchMinter(address(batch));
+        uniPooler.setNudgeStreamer(address(streamer));
+        uniPooler.setBatchMinter(address(batch));
     }
 
     // =====================================================================
@@ -236,11 +253,11 @@ contract NudgeStreamerDonorIntegrationTest is Test {
     /// @dev Real mint through `NFTMinterV2` on the pooler's index: the user pays 18-dp USDS,
     ///      which lands on the pooler, whose `dispatch` wraps 90% into sUSDS and pushes the
     ///      other 10% through the PSM and on into the streamer as USDC.
-    function _mintThroughBalancerPooler(address user, uint256 price) internal {
+    function _mintThroughUniPooler(address user, uint256 price) internal {
         usds.mint(user, price);
         vm.startPrank(user);
         usds.approve(address(nftMinter), price);
-        nftMinter.mint(BALANCER_INDEX, user);
+        nftMinter.mint(POOLER_INDEX, user);
         vm.stopPrank();
     }
 
@@ -388,48 +405,49 @@ contract NudgeStreamerDonorIntegrationTest is Test {
     }
 
     // =====================================================================
-    // BalancerPoolerV2 -> the same real stack (story 047)
+    // UniPoolerV2 -> the same real stack (story 047 donation path)
     // =====================================================================
 
     /// @dev The PSM delivers USDC to the POOLER (not the batch-minter); the pooler then streams
     ///      it. `NudgeCollected`'s donor field proves the pooler itself is the donor of record.
-    function test_balancerPoolerDispatch_donationReachesTheStreamer() public {
+    function test_uniPoolerDispatch_donationReachesTheStreamer() public {
         uint256 amount = 1000e18; // 10% => 100e18 USDS -> 100e6 USDC at tout = 0
         uint256 donationUSDC = 100e6;
-        usds.mint(address(balancerPooler), amount);
+        usds.mint(address(uniPooler), amount);
 
         uint256 expectedRate = (donationUSDC * 1e18) / STREAM_DURATION;
         vm.expectEmit(true, true, true, true, address(streamer));
         emit NudgeStreamer.NudgeCollected(
-            address(batch), address(usdc), address(balancerPooler), donationUSDC, expectedRate
+            address(batch), address(usdc), address(uniPooler), donationUSDC, expectedRate
         );
 
         vm.prank(address(nftMinter));
-        balancerPooler.dispatch(address(nftMinter), amount, "");
+        uniPooler.dispatch(address(nftMinter), amount, "");
 
         (, uint256 buffer, uint256 rewardPerSecond,) = streamer.streams(address(batch), address(usdc));
         assertEq(buffer, donationUSDC, "streamer buffers the 10% donation");
         assertEq(rewardPerSecond, expectedRate, "rate recomputed over the full window");
         assertEq(usdc.balanceOf(address(streamer)), donationUSDC, "streamer custodies the USDC");
         assertEq(usdc.balanceOf(address(batch)), 0, "batch-minter is paid only as the stream releases");
-        assertEq(usdc.balanceOf(address(balancerPooler)), 0, "pooler retains no USDC");
-        assertEq(sUsds.balanceOf(address(balancerPooler)), 900e18, "the other 90% is wrapped for pool()");
-        assertEq(usds.balanceOf(address(balancerPooler)), 0, "nothing parked on success");
+        assertEq(usdc.balanceOf(address(uniPooler)), 0, "pooler retains no USDC");
+        assertEq(sUsds.balanceOf(address(uniPooler)), 900e18, "the other 90% is wrapped for pool()");
+        assertEq(usds.balanceOf(address(uniPooler)), 0, "nothing parked on success");
     }
 
     /// @dev Full production path: a real NFT mint on the pooler's index funds the stream.
-    function test_realMintThroughBalancerPooler_reachesTheStreamer() public {
-        _mintThroughBalancerPooler(address(0xCA11), BALANCER_MINT_PRICE);
+    function test_realMintThroughUniPooler_reachesTheStreamer() public {
+        _mintThroughUniPooler(address(0xCA11), POOLER_MINT_PRICE);
 
         assertEq(usdc.balanceOf(address(streamer)), 100e6, "10% of the mint payment streamed as USDC");
-        assertEq(sUsds.balanceOf(address(balancerPooler)), 900e18, "90% wrapped to sUSDS");
-        assertEq(nftMinter.balanceOf(address(0xCA11), BALANCER_INDEX), 1, "claim NFT minted");
+        assertEq(sUsds.balanceOf(address(uniPooler)), 900e18, "90% wrapped to sUSDS");
+        assertEq(nftMinter.balanceOf(address(0xCA11), POOLER_INDEX), 1, "claim NFT minted");
+        assertEq(poolerHook.lastAmount(), POOLER_MINT_PRICE, "hook sees the gross dispatched USDS");
     }
 
     /// @dev The pooler's donation is indistinguishable from any other donor downstream: it
     ///      accrues linearly and a real qualifying `batchMint` flushes and pays it out.
-    function test_balancerPoolerDonation_flushedAndPaidByRealBatchMint() public {
-        _mintThroughBalancerPooler(address(0xCA11), BALANCER_MINT_PRICE);
+    function test_uniPoolerDonation_flushedAndPaidByRealBatchMint() public {
+        _mintThroughUniPooler(address(0xCA11), POOLER_MINT_PRICE);
 
         vm.warp(block.timestamp + STREAM_DURATION / 2);
         uint256 accrued = streamer.pendingStream(address(batch), address(usdc));
@@ -445,22 +463,22 @@ contract NudgeStreamerDonorIntegrationTest is Test {
     /// @dev Failure isolation survives the streamer hop: an unregistered streamer makes
     ///      `collectNudge` revert `NudgeStreamer__NotRegistered()`, which the pooler's
     ///      `try/catch` swallows. The mint still succeeds and the USDS parks for retry.
-    function test_balancerPoolerDonation_streamerMisconfigured_parksAndMintStillSucceeds() public {
+    function test_uniPoolerDonation_streamerMisconfigured_parksAndMintStillSucceeds() public {
         NudgeStreamer unregistered = new NudgeStreamer(owner);
-        balancerPooler.setNudgeStreamer(address(unregistered));
+        uniPooler.setNudgeStreamer(address(unregistered));
 
-        _mintThroughBalancerPooler(address(0xCA11), BALANCER_MINT_PRICE);
+        _mintThroughUniPooler(address(0xCA11), POOLER_MINT_PRICE);
 
-        assertEq(nftMinter.balanceOf(address(0xCA11), BALANCER_INDEX), 1, "mint is never blocked by the donation");
-        assertEq(usds.balanceOf(address(balancerPooler)), 100e18, "donation USDS parked");
+        assertEq(nftMinter.balanceOf(address(0xCA11), POOLER_INDEX), 1, "mint is never blocked by the donation");
+        assertEq(usds.balanceOf(address(uniPooler)), 100e18, "donation USDS parked");
         assertEq(usdc.balanceOf(address(unregistered)), 0, "nothing reached the misconfigured streamer");
-        assertEq(sUsds.balanceOf(address(balancerPooler)), 900e18, "pooling portion unaffected");
+        assertEq(sUsds.balanceOf(address(uniPooler)), 900e18, "pooling portion unaffected");
 
         // Repointing at the correctly registered streamer drains the backlog on the next mint.
-        balancerPooler.setNudgeStreamer(address(streamer));
-        _mintThroughBalancerPooler(address(0xCA12), BALANCER_MINT_PRICE);
+        uniPooler.setNudgeStreamer(address(streamer));
+        _mintThroughUniPooler(address(0xCA12), POOLER_MINT_PRICE);
         assertEq(usdc.balanceOf(address(streamer)), 200e6, "parked + fresh donation swept together");
-        assertEq(usds.balanceOf(address(balancerPooler)), 0, "backlog cleared");
+        assertEq(usds.balanceOf(address(uniPooler)), 0, "backlog cleared");
     }
 
     // =====================================================================
@@ -504,9 +522,9 @@ contract NudgeStreamerDonorIntegrationTest is Test {
         uniboost.dispatch(address(nftMinter), uniAmount, "");
 
         uint256 poolerAmount = 1000e18; // 10% => 100e6 USDC
-        usds.mint(address(balancerPooler), poolerAmount);
+        usds.mint(address(uniPooler), poolerAmount);
         vm.prank(address(nftMinter));
-        balancerPooler.dispatch(address(nftMinter), poolerAmount, "");
+        uniPooler.dispatch(address(nftMinter), poolerAmount, "");
 
         uint256 total = ratchetDonation + uniAmount / 2 + 100e6;
         (, uint256 buffer, uint256 rate,) = streamer.streams(address(batch), address(usdc));
