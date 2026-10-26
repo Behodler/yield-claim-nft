@@ -368,9 +368,12 @@ contract NFTBonfireTest is Test {
         vm.warp(block.timestamp + 5 days);
         bonfire.setMaxPayout(1e18);
         assertEq(bonfire.pendingPayout(), 1e18);
+        // Stored pot was checkpointed at 5e18 (old max unlimited) but reads capped at 1e18.
+        assertEq(bonfire.accruedStored(), 5e18);
         bonfire.setMaxPayout(0);
-        // Stored pot was 5e18 (old max unlimited); removing the cap exposes it again.
-        assertEq(bonfire.pendingPayout(), 5e18);
+        // Removing the cap checkpoints under the 1e18 cap first: the excess is forfeited.
+        assertEq(bonfire.accruedStored(), 1e18);
+        assertEq(bonfire.pendingPayout(), 1e18);
     }
 
     // =========================================================================
